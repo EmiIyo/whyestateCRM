@@ -26,11 +26,13 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: 'boards.remove_members', label: 'Remove members from a board',     group: 'Boards' },
 
   // Folders
-  { key: 'folders.create',        label: 'Create folder',                   group: 'Folders' },
-  { key: 'folders.edit',          label: 'Rename folder',                   group: 'Folders' },
-  { key: 'folders.delete',        label: 'Delete folder',                   group: 'Folders' },
-  { key: 'folders.assign_boards', label: 'Move boards into folders',        group: 'Folders' },
-  { key: 'folders.view_combined', label: 'Open combined folder view',       group: 'Folders' },
+  { key: 'folders.create',         label: 'Create folder',                   group: 'Folders' },
+  { key: 'folders.edit',           label: 'Rename folder',                   group: 'Folders' },
+  { key: 'folders.delete',         label: 'Delete folder',                   group: 'Folders' },
+  { key: 'folders.assign_boards',  label: 'Move boards into folders',        group: 'Folders' },
+  { key: 'folders.view_combined',  label: 'Open combined folder view',       group: 'Folders' },
+  { key: 'folders.invite_members', label: 'Invite members to a folder',      group: 'Folders' },
+  { key: 'folders.remove_members', label: 'Remove members from a folder',    group: 'Folders' },
 
   // Prospect rows (data)
   { key: 'rows.create',           label: 'Add new prospect row',            group: 'Prospects' },

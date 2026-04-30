@@ -3,7 +3,10 @@
     "allow": [
       "mcp__supabase__apply_migration",
       "mcp__supabase__execute_sql",
-      "mcp__supabase__generate_typescript_types"
+      "mcp__supabase__generate_typescript_types",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(grep -n \"^\\\\s*//.*TODO\\\\|^\\\\s*//.*FIXME\\\\|^\\\\s*//.*unused\\\\|^\\\\s*//.*dead\\\\|^\\\\s*//.*never\" 'C:\\\\Users\\\\ixlin\\\\Downloads\\\\prospect_hub_board_view\\\\src\\\\pages\\\\ProspectHub.tsx')"
     ]
   }
 }

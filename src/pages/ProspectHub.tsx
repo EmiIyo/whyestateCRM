@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect, useMemo, useCallback, MutableRefObject } from 'react';
+import { useState, useRef, useEffect, useMemo, MutableRefObject } from 'react';
 import { createPortal } from 'react-dom';
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import {
   Plus, Search, Filter, Download, Upload, ChevronDown, ChevronLeft, ChevronRight, X, Check, Trash2, Copy,
-  AlertCircle, CheckCircle2, Loader2, ArrowLeft, Users,
+  AlertCircle, CheckCircle2, Loader2, Users,
   GripVertical, Settings2, Mail, Folder as FolderIcon, FolderPlus, Layers,
+  FileText, FileSpreadsheet,
 } from 'lucide-react';
 import * as SliderPrimitive from '@radix-ui/react-slider';
 import { getCurrentUser, listAllUsers } from '@/lib/auth';
@@ -24,6 +25,7 @@ interface Folder {
   id: string;
   name: string;
   ownerEmail: string;
+  ownerName?: string;
 }
 
 const BOARD_COLORS = [
@@ -51,11 +53,12 @@ interface AgentPreset {
 // same browser. (Same model translates 1:1 to Supabase RLS when wired.)
 const CRM_STORAGE_KEY = 'we.crm.state';
 interface CrmState {
-  boards:    Board[];
-  prospects: Record<string, Prospect[]>;
-  members:   Record<string, BoardMember[]>;
-  folders?:  Folder[];
-  agents?:   AgentPreset[];
+  boards:        Board[];
+  prospects:     Record<string, Prospect[]>;
+  members:       Record<string, BoardMember[]>;
+  folders?:      Folder[];
+  folderMembers?: Record<string, BoardMember[]>;
+  agents?:       AgentPreset[];
 }
 function loadCrmState(): CrmState | null {
   try {
@@ -290,168 +293,6 @@ function NewBoardModal({ onClose, onCreate }: {
           <button onClick={submit} disabled={!name.trim()}
             className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40"
             style={{ background: color }}>Create Board</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Manage Boards Modal ────────────────────────────────────────────────────────
-function ManageBoardsModal({ boards, onClose, onReorder, onDelete, onAddBoard, onExport, perms }: {
-  boards: Board[];
-  onClose: () => void;
-  onReorder: (boards: Board[]) => void;
-  onDelete: (id: string) => void;
-  onAddBoard: () => void;
-  onExport: (boardId: string | null) => void;
-  perms: { boardsCreate: boolean; boardsDelete: boolean; dataExport: boolean };
-}) {
-  const [list, setList]           = useState<Board[]>(boards);
-  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  const [showExportPicker, setShowExportPicker] = useState(false);
-  const exportRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!showExportPicker) return;
-    const h = (e: MouseEvent) => {
-      if (exportRef.current && !exportRef.current.contains(e.target as Node)) setShowExportPicker(false);
-    };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, [showExportPicker]);
-  const dragIndex = useRef<number | null>(null);
-  const dragOverIndex = useRef<number | null>(null);
-
-  const onDragStart = (i: number) => { dragIndex.current = i; };
-  const onDragEnter = (i: number) => {
-    dragOverIndex.current = i;
-    if (dragIndex.current === null || dragIndex.current === i) return;
-    const next = [...list];
-    const [moved] = next.splice(dragIndex.current, 1);
-    next.splice(i, 0, moved);
-    dragIndex.current = i;
-    setList(next);
-  };
-  const onDragEnd = () => {
-    onReorder(list);
-    dragIndex.current = null;
-    dragOverIndex.current = null;
-  };
-
-  const handleDelete = (id: string) => {
-    onDelete(id);
-    setList((prev) => prev.filter((b) => b.id !== id));
-    setDeleteConfirm(null);
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
-      <div className="bg-white rounded-2xl shadow-2xl w-[440px] overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)', maxHeight: '80vh' }}>
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Manage Boards</h3>
-            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Drag to reorder · click trash to delete</p>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
-        </div>
-
-        {/* Board list */}
-        <div className="overflow-y-auto px-4 py-3 space-y-2" style={{ maxHeight: 'calc(80vh - 130px)' }}>
-          {list.length === 0 && (
-            <p className="text-center py-8 text-sm" style={{ color: '#9CA3AF' }}>No boards yet</p>
-          )}
-          {list.map((board, i) => (
-            <div
-              key={board.id}
-              draggable
-              onDragStart={() => onDragStart(i)}
-              onDragEnter={() => onDragEnter(i)}
-              onDragEnd={onDragEnd}
-              onDragOver={(e) => e.preventDefault()}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-all select-none"
-              style={{ background: '#FAFAFA', borderColor: '#E5E7EB', cursor: 'grab' }}>
-
-              {/* Drag handle */}
-              <GripVertical size={15} className="text-gray-300 flex-shrink-0" />
-
-              {/* Colour dot */}
-              <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: board.color }} />
-
-              {/* Name + location */}
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold truncate" style={{ color: '#2B3340' }}>{board.name}</p>
-                {board.location && <p className="text-xs truncate" style={{ color: '#9CA3AF' }}>{board.location}</p>}
-              </div>
-
-              {/* Position badge */}
-              <span className="text-xs font-bold w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
-                style={{ background: '#F3F4F6', color: '#9CA3AF' }}>{i + 1}</span>
-
-              {/* Delete */}
-              {deleteConfirm === board.id ? (
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <span className="text-xs" style={{ color: '#EF4444' }}>Delete?</span>
-                  <button onClick={() => handleDelete(board.id)}
-                    className="px-2 py-0.5 rounded-lg text-xs font-semibold text-white"
-                    style={{ background: '#EF4444' }}>Yes</button>
-                  <button onClick={() => setDeleteConfirm(null)}
-                    className="px-2 py-0.5 rounded-lg text-xs font-semibold border border-gray-200 text-gray-600 hover:bg-gray-50">No</button>
-                </div>
-              ) : (
-                <button onClick={() => setDeleteConfirm(board.id)}
-                  className="p-1.5 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0">
-                  <Trash2 size={14} className="text-gray-300 hover:text-red-400" />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
-          <div className="flex items-center gap-2">
-            {perms.boardsCreate && (
-              <button onClick={onAddBoard}
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-sm font-semibold border border-dashed hover:border-[#1EC9C4] hover:text-[#1EC9C4] transition-colors"
-                style={{ borderColor: '#D1D5DB', color: '#6B7280', background: 'white' }}>
-                <Plus size={14} strokeWidth={2.5} /> Add Project Board
-              </button>
-            )}
-            <div ref={exportRef} className="relative" style={{ display: perms.dataExport ? undefined : 'none' }}>
-              <button onClick={() => setShowExportPicker((o) => !o)}
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-sm font-semibold border hover:border-[#1EC9C4] hover:text-[#1EC9C4] transition-colors"
-                style={{ borderColor: '#E5E7EB', color: '#6B7280', background: 'white' }}>
-                <Download size={14} strokeWidth={2.5} /> Export CSV
-              </button>
-              {showExportPicker && (
-                <div
-                  className="absolute z-50 left-0 bottom-full mb-1 min-w-[220px] bg-white rounded-xl border border-gray-100 py-1 max-h-[260px] overflow-y-auto"
-                  style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider px-3 pt-2 pb-1" style={{ color: '#9CA3AF' }}>
-                    Choose board
-                  </p>
-                  <button onClick={() => { onExport(null); setShowExportPicker(false); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-gray-50 transition-colors"
-                    style={{ color: '#2B3340' }}>
-                    <Download size={12} className="text-gray-400" /> All boards combined
-                  </button>
-                  {list.length > 0 && <div className="my-1 border-t border-gray-100" />}
-                  {list.map((b) => (
-                    <button key={b.id}
-                      onClick={() => { onExport(b.id); setShowExportPicker(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-gray-50 transition-colors"
-                      style={{ color: '#374151' }}>
-                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: b.color }} />
-                      <span className="truncate">{b.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-          <button onClick={onClose}
-            className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90"
-            style={{ background: '#1EC9C4' }}>Done</button>
         </div>
       </div>
     </div>
@@ -789,18 +630,20 @@ function CombineFoldersModal({
 
 // ─── Board Overview ───────────────────────────────────────────────────────────
 function BoardOverview({
-  boards, folders, collapsedFolders, memberCounts, updatedPcts,
-  onOpenBoard, onManageBoard, onAddBoard, arrangeMode, onToggleArrange, onReorder,
+  boards, folders, folderMemberCounts, collapsedFolders, memberCounts, updatedPcts,
+  onOpenBoard, onManageBoard, onManageFolder, onAddBoard, arrangeMode, onToggleArrange, onReorder,
   onAddFolder, onRenameFolder, onDeleteFolder, onMoveBoardToFolder, onToggleFolder,
   onLoadDemo, onUnloadDemo, onOpenFolderView, onOpenCombinedFolderView, perms,
 }: {
   boards: Board[];
   folders: Folder[];
+  folderMemberCounts: Record<string, number>;
   collapsedFolders: Set<string>;
   memberCounts: Record<string, number>;
   updatedPcts:  Record<string, number>;
   onOpenBoard: (board: Board) => void;
   onManageBoard: (board: Board) => void;
+  onManageFolder: (folder: Folder) => void;
   onAddBoard: () => void;
   arrangeMode: boolean;
   onToggleArrange: () => void;
@@ -822,6 +665,7 @@ function BoardOverview({
     foldersDelete: boolean;
     foldersAssignBoards: boolean;
     foldersViewCombined: boolean;
+    foldersManage: boolean;
     dataDemo: boolean;
   };
 }) {
@@ -842,7 +686,6 @@ function BoardOverview({
     | { mode: 'rename'; folderId: string; initial: string }
     | null
   >(null);
-  const [folderToDelete, setFolderToDelete] = useState<Folder | null>(null);
   const [showCombineFolders, setShowCombineFolders] = useState(false);
 
   const dragIndex = useRef<number | null>(null);
@@ -1018,18 +861,20 @@ function BoardOverview({
                   <Layers size={11} /> View All
                 </button>
               )}
-              {perms.foldersEdit && (
+              {(folderMemberCounts[folder.id] ?? 0) > 0 && (
+                <span
+                  title={`${folderMemberCounts[folder.id]} invited ${folderMemberCounts[folder.id] === 1 ? 'member' : 'members'}`}
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                  style={{ background: '#DAF3F2', color: '#0F766E' }}>
+                  <Users size={9} /> {folderMemberCounts[folder.id]}
+                </span>
+              )}
+              {perms.foldersManage && (
                 <button
-                  onClick={() => setFolderPrompt({ mode: 'rename', folderId: folder.id, initial: folder.name })}
+                  onClick={() => onManageFolder(folder)}
+                  title="Manage folder — rename, invite members, delete"
                   className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-gray-100 transition-all">
                   <Settings2 size={12} className="text-gray-400" />
-                </button>
-              )}
-              {perms.foldersDelete && (
-                <button
-                  onClick={() => setFolderToDelete(folder)}
-                  className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-50 transition-all">
-                  <Trash2 size={12} className="text-gray-400 hover:text-red-400" />
                 </button>
               )}
             </div>
@@ -1074,17 +919,6 @@ function BoardOverview({
             else onRenameFolder(folderPrompt.folderId, name);
           }}
           onClose={() => setFolderPrompt(null)}
-        />
-      )}
-
-      {folderToDelete && (
-        <ConfirmModal
-          title={`Delete folder "${folderToDelete.name}"?`}
-          message="Boards inside will move out to Ungrouped — they won't be deleted."
-          confirmLabel="Delete folder"
-          tone="danger"
-          onConfirm={() => onDeleteFolder(folderToDelete.id)}
-          onClose={() => setFolderToDelete(null)}
         />
       )}
 
@@ -1386,6 +1220,212 @@ function ManageBoardModal({
                   style={{ borderColor: '#FECACA', color: '#DC2626', background: 'white' }}>
                   <Trash2 size={14} /> Delete board and all data
                 </button>
+              )}
+            </section>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Manage Folder Modal — rename + invite + remove members ─────────────────
+function ManageFolderModal({
+  folder, ownerEmail, ownerName, members, boardCount,
+  canRename, canInvite, canRemoveMembers, canDelete,
+  onClose, onRename, onInvite, onRemoveMember, onDelete,
+}: {
+  folder: Folder;
+  ownerEmail: string;
+  ownerName: string;
+  members: BoardMember[];
+  boardCount: number;
+  canRename: boolean;
+  canInvite: boolean;
+  canRemoveMembers: boolean;
+  canDelete: boolean;
+  onClose: () => void;
+  onRename: (name: string) => void;
+  onInvite: (email: string, role: MemberRole) => void;
+  onRemoveMember: (id: string) => void;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState(folder.name);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole]   = useState<MemberRole>('editor');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const submitInvite = () => {
+    const e = inviteEmail.trim();
+    if (!e || !e.includes('@')) return;
+    onInvite(e, inviteRole);
+    setInviteEmail('');
+  };
+  const saveName = () => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === folder.name) return;
+    onRename(trimmed);
+  };
+  const ownerInitials = (ownerName || ownerEmail).split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
+      <div className="bg-white rounded-2xl w-[460px] max-h-[90vh] flex flex-col overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+        <div className="flex items-start justify-between px-6 pt-5 pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#DAF3F2' }}>
+              <FolderIcon size={15} style={{ color: '#0F766E' }} />
+            </div>
+            <div>
+              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Manage folder</h3>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
+                {boardCount} {boardCount === 1 ? 'board' : 'boards'} · {members.length} invited
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
+        </div>
+
+        <div className="flex-1 overflow-auto px-6 pb-5 space-y-5">
+          {/* Folder name */}
+          {canRename && (
+            <section>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: '#9CA3AF' }}>Folder Name</p>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveName(); }}
+                className="w-full text-sm border rounded-xl px-3 py-2 outline-none focus:border-[#1EC9C4]"
+                style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }}
+              />
+              {name.trim() && name.trim() !== folder.name && (
+                <button onClick={saveName}
+                  className="mt-2 text-xs font-semibold px-3 py-1 rounded-lg text-white hover:opacity-90"
+                  style={{ background: '#1EC9C4' }}>Save name</button>
+              )}
+            </section>
+          )}
+
+          {/* Members */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Members</p>
+
+            {/* Owner */}
+            <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl mb-2" style={{ background: '#F8FAFB' }}>
+              <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: '#DAF3F2' }}>
+                <span className="text-[10px] font-bold" style={{ color: '#1EC9C4' }}>{ownerInitials}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold truncate" style={{ color: '#2B3340' }}>{ownerName || ownerEmail.split('@')[0]}</p>
+                <p className="text-xs truncate" style={{ color: '#9CA3AF' }}>{ownerEmail}</p>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md flex-shrink-0"
+                style={{ background: '#FEF3C7', color: '#92400E' }}>Owner</span>
+            </div>
+
+            {members.length === 0 ? (
+              <p className="text-xs text-center py-3" style={{ color: '#9CA3AF' }}>No invited members yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {(() => {
+                  const dir = new Map<string, string>();
+                  for (const u of listAllUsers()) dir.set(u.email.toLowerCase(), u.name);
+                  return members.map((m) => {
+                    const nickname = dir.get(m.email.toLowerCase());
+                    const initials = (nickname || m.email).split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
+                    const isSignedUp = !!nickname;
+                    const roleKey = String(m.role).toLowerCase() as AppRole;
+                    const def = APP_ROLES.find((r) => r.id === roleKey);
+                    const label = def?.label ?? String(m.role);
+                    const tone  = def?.tone ?? { bg: '#F3F4F6', text: '#374151' };
+                    return (
+                      <div key={m.id} className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border" style={{ borderColor: '#F1F5F9' }}>
+                        <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
+                          style={{ background: isSignedUp ? '#1EC9C4' : '#F3F4F6' }}>
+                          {isSignedUp
+                            ? <span className="text-[10px] font-bold text-white">{initials}</span>
+                            : <Mail size={12} style={{ color: '#9CA3AF' }} />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          {isSignedUp ? (
+                            <>
+                              <p className="text-xs font-bold truncate" style={{ color: '#2B3340' }}>{nickname}</p>
+                              <p className="text-[10px] truncate" style={{ color: '#9CA3AF' }}>{m.email}</p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs font-medium truncate" style={{ color: '#374151' }}>{m.email}</p>
+                              <p className="text-[10px] italic" style={{ color: '#9CA3AF' }}>Pending — not signed up</p>
+                            </>
+                          )}
+                        </div>
+                        <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md flex-shrink-0"
+                          style={{ background: tone.bg, color: tone.text }}>{label}</span>
+                        {canRemoveMembers && (
+                          <button onClick={() => onRemoveMember(m.id)}
+                            className="p-1.5 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0"
+                            title="Remove member">
+                            <Trash2 size={12} className="text-gray-300 hover:text-red-400" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
+          </section>
+
+          {/* Invite */}
+          {canInvite && (
+            <section>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Invite Member</p>
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitInvite(); }}
+                  placeholder="Email address"
+                  type="email"
+                  className="flex-1 px-3 py-2 rounded-lg border outline-none text-sm"
+                  style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }}
+                />
+                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as MemberRole)}
+                  className="px-3 py-2 rounded-lg border outline-none text-sm bg-white"
+                  style={{ borderColor: '#E5E7EB' }}>
+                  {INVITE_ROLES.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                </select>
+              </div>
+              <button onClick={submitInvite}
+                className="w-full px-5 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90 transition-opacity"
+                style={{ background: '#1EC9C4' }}>
+                Send Invite
+              </button>
+              <p className="text-[10px] mt-2" style={{ color: '#9CA3AF' }}>
+                Invited members can see this folder and every board inside it.
+              </p>
+            </section>
+          )}
+
+          {/* Danger zone */}
+          {canDelete && (
+            <section className="border-t pt-5" style={{ borderColor: '#FECACA' }}>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: '#DC2626' }}>Danger Zone</p>
+              <p className="text-xs mb-3" style={{ color: '#6B7280' }}>
+                Delete this folder. Boards inside will move out to Ungrouped — they will not be deleted.
+              </p>
+              {confirmDelete ? (
+                <div className="flex gap-2">
+                  <button onClick={() => setConfirmDelete(false)}
+                    className="flex-1 px-4 py-2 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
+                  <button onClick={onDelete}
+                    className="flex-1 px-4 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90"
+                    style={{ background: '#DC2626' }}>Yes, delete folder</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmDelete(true)}
+                  className="px-4 py-2 rounded-xl text-sm font-medium border text-red-600 hover:bg-red-50"
+                  style={{ borderColor: '#FECACA' }}>Delete folder</button>
               )}
             </section>
           )}
@@ -2211,6 +2251,97 @@ const STEP_LABELS: Record<ImportStep, string> = {
   error:   'Error',
 };
 
+// ─── Export modal — pick a format (CSV / Excel) ─────────────────────────────
+type ExportFormat = 'csv' | 'xlsx';
+
+function ExportFormatCard({ icon, iconBg, iconColor, label, ext, desc, onClick }: {
+  icon: React.ReactNode;
+  iconBg: string;
+  iconColor: string;
+  label: string;
+  ext: string;
+  desc: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-200 hover:border-[#1EC9C4] hover:bg-[#F0FFFE] hover:shadow-sm transition-all text-left group">
+      <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: iconBg, color: iconColor }}>
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-sm font-semibold" style={{ color: '#1A202C' }}>{label}</span>
+          <span className="text-[10px] font-mono uppercase tracking-wider" style={{ color: '#9CA3AF' }}>{ext}</span>
+        </div>
+        <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: '#6B7280' }}>{desc}</p>
+      </div>
+      <ChevronRight size={14} className="text-gray-300 group-hover:text-[#1EC9C4] flex-shrink-0 transition-colors" />
+    </button>
+  );
+}
+
+function ExportModal({ rowCount, onExport, onClose }: {
+  rowCount: number;
+  onExport: (format: ExportFormat) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const pick = (format: ExportFormat) => { onExport(format); onClose(); };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
+      <div className="bg-white rounded-2xl w-[460px] overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+        <div className="flex items-start justify-between px-6 pt-5 pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#DAF3F2' }}>
+              <Download size={15} style={{ color: '#0F766E' }} />
+            </div>
+            <div>
+              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Export data</h3>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
+                {rowCount} {rowCount === 1 ? 'row' : 'rows'} from the current view · pick a format
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
+        </div>
+
+        <div className="px-6 pb-5 space-y-2">
+          <ExportFormatCard
+            icon={<FileText size={16} />}
+            iconBg="#FEE2E2"
+            iconColor="#DC2626"
+            label="CSV"
+            ext=".csv"
+            desc="Plain text. Universally supported — Excel, Numbers, any text editor."
+            onClick={() => pick('csv')}
+          />
+          <ExportFormatCard
+            icon={<FileSpreadsheet size={16} />}
+            iconBg="#DCFCE7"
+            iconColor="#16A34A"
+            label="Excel"
+            ext=".xlsx"
+            desc="Microsoft Excel workbook with sized columns and proper cell types."
+            onClick={() => pick('xlsx')}
+          />
+        </div>
+
+        <div className="flex justify-end gap-2 px-6 py-3 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
+          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ImportModal({ onClose, onImport }: {
   onClose: () => void;
   onImport: (rows: Prospect[], mode: ImportMode) => void;
@@ -2920,7 +3051,11 @@ export default function ProspectHub() {
         ownerName:  b.ownerName  || (b.ownerEmail ? b.ownerEmail.split('@')[0] : OWNER_NAME),
         folderId:   b.folderId === undefined ? null : b.folderId,
       }));
-      return { boards, prospects: loaded.prospects ?? {}, members: loaded.members ?? {}, folders: loaded.folders ?? [], agents: loaded.agents ?? [] };
+      const folders = (loaded.folders ?? []).map((f) => ({
+        ...f,
+        ownerName: f.ownerName ?? (f.ownerEmail ? f.ownerEmail.split('@')[0] : ''),
+      }));
+      return { boards, prospects: loaded.prospects ?? {}, members: loaded.members ?? {}, folders, folderMembers: loaded.folderMembers ?? {}, agents: loaded.agents ?? [] };
     }
     // First-time-ever bootstrap on this browser → seed demo data owned by current user.
     const seedBoards: Board[] = SEED_BOARDS_TEMPLATE.map((b) => ({ ...b, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME, folderId: null }));
@@ -2932,7 +3067,7 @@ export default function ProspectHub() {
       board_5: seedProspects.slice(15, 17),
       board_6: seedProspects.slice(17),
     };
-    return { boards: seedBoards, prospects: seedByBoard, members: {} as Record<string, BoardMember[]>, folders: [] as Folder[], agents: [] as AgentPreset[] };
+    return { boards: seedBoards, prospects: seedByBoard, members: {} as Record<string, BoardMember[]>, folders: [] as Folder[], folderMembers: {} as Record<string, BoardMember[]>, agents: [] as AgentPreset[] };
   })();
 
   // ── Board state ───────────────────────────────────────────────────────────
@@ -2940,28 +3075,41 @@ export default function ProspectHub() {
   const [view, setView]     = useState<'board' | 'grid'>('board');
   const [activeBoard, setActiveBoard] = useState<Board | null>(null);
   const [showNewBoard, setShowNewBoard]         = useState(false);
-  const [showManageBoards, setShowManageBoards] = useState(false);
   const [arrangeMode, setArrangeMode]           = useState(false);
   const [manageBoardId, setManageBoardId]       = useState<string | null>(null);
+  const [manageFolderId, setManageFolderId]     = useState<string | null>(null);
   const [boardMembers, setBoardMembers]         = useState<Record<string, BoardMember[]>>(initialState.members);
   const [boardProspects, setBoardProspects]     = useState<Record<string, Prospect[]>>(initialState.prospects);
   const [folders, setFolders]                   = useState<Folder[]>(initialState.folders);
+  const [folderMembers, setFolderMembers]       = useState<Record<string, BoardMember[]>>(initialState.folderMembers);
   const [agentPresets, setAgentPresets]         = useState<AgentPreset[]>(initialState.agents);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   // Folder-aggregate view supports either a single folder or a combined set of folders.
   const [folderView, setFolderView]             = useState<{ name: string; folderIds: string[] } | null>(null);
 
-  // ── Visibility filter: only show boards I own or am invited to ───────────
+  // ── Folder visibility: own it OR invited to it ──────────────────────────
+  const isFolderVisible = (f: Folder): boolean => {
+    if (f.ownerEmail.toLowerCase() === myEmail) return true;
+    return (folderMembers[f.id] ?? []).some((m) => m.email.toLowerCase() === myEmail);
+  };
+
+  // ── Board visibility: own it OR invited to it OR invited to its folder ───
   const isVisible = (b: Board): boolean => {
     if (b.ownerEmail.toLowerCase() === myEmail) return true;
-    return (boardMembers[b.id] ?? []).some((m) => m.email.toLowerCase() === myEmail);
+    if ((boardMembers[b.id] ?? []).some((m) => m.email.toLowerCase() === myEmail)) return true;
+    if (b.folderId) {
+      const folder = folders.find((f) => f.id === b.folderId);
+      if (folder && isFolderVisible(folder)) return true;
+    }
+    return false;
   };
   const visibleBoards = boards.filter(isVisible);
+  const visibleFolders = folders.filter(isFolderVisible);
 
   // ── Persist any change back to shared localStorage ────────────────────────
   useEffect(() => {
-    saveCrmState({ boards, prospects: boardProspects, members: boardMembers, folders, agents: agentPresets });
-  }, [boards, boardProspects, boardMembers, folders, agentPresets]);
+    saveCrmState({ boards, prospects: boardProspects, members: boardMembers, folders, folderMembers, agents: agentPresets });
+  }, [boards, boardProspects, boardMembers, folders, folderMembers, agentPresets]);
 
   // ── Agent preset CRUD ─────────────────────────────────────────────────────
   const addAgentPreset = (name: string, color: string): AgentPreset => {
@@ -3001,11 +3149,21 @@ export default function ProspectHub() {
     setBoardMembers((prev) => ({ ...prev, [boardId]: (prev[boardId] ?? []).filter((m) => m.id !== memberId) }));
   };
 
+  const inviteFolderMember = (folderId: string, email: string, role: MemberRole) => {
+    const member: BoardMember = { id: `fm_${Date.now()}`, email, role };
+    setFolderMembers((prev) => ({ ...prev, [folderId]: [...(prev[folderId] ?? []), member] }));
+    setUserRoleGlobal(email, role);
+  };
+
+  const removeFolderMember = (folderId: string, memberId: string) => {
+    setFolderMembers((prev) => ({ ...prev, [folderId]: (prev[folderId] ?? []).filter((m) => m.id !== memberId) }));
+  };
+
   // ── Folder mutations ──────────────────────────────────────────────────────
   const createFolder = (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const folder: Folder = { id: `folder_${Date.now()}`, name: trimmed, ownerEmail: OWNER_EMAIL };
+    const folder: Folder = { id: `folder_${Date.now()}`, name: trimmed, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME };
     setFolders((prev) => [...prev, folder]);
   };
   const renameFolder = (id: string, name: string) => {
@@ -3014,9 +3172,10 @@ export default function ProspectHub() {
     setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
   };
   const deleteFolder = (id: string) => {
-    // Move boards out of the folder, then drop the folder itself.
+    // Move boards out of the folder, then drop the folder itself + its member list.
     setBoards((prev) => prev.map((b) => (b.folderId === id ? { ...b, folderId: null } : b)));
     setFolders((prev) => prev.filter((f) => f.id !== id));
+    setFolderMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
   };
   const moveBoardToFolder = (boardId: string, folderId: string | null) => {
     setBoards((prev) => prev.map((b) => (b.id === boardId ? { ...b, folderId } : b)));
@@ -3187,6 +3346,7 @@ export default function ProspectHub() {
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [rowMenu, setRowMenu] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
+  const [showExport, setShowExport] = useState(false);
   const [showAddField, setShowAddField] = useState(false);
 
   // ── Dynamic columns (base + custom) ──────────────────────────────────────
@@ -3460,30 +3620,200 @@ export default function ProspectHub() {
     window.addEventListener('mouseup', onUp);
   };
 
-  // ── Export CSV ────────────────────────────────────────────────────────────
-  // boardId: null = all boards combined; '' = current view; else specific board
-  const exportCsv = (boardId: string | null | undefined = undefined) => {
-    let exportRows: Prospect[];
-    let filename: string;
+  // ── Export ────────────────────────────────────────────────────────────────
+  // Resolve which rows + base filename a given scope refers to.
+  // boardId: undefined = current view (filtered); null = all visible boards; else specific board
+  // The base filename is `<slug>-<YYYY-MM-DD>` so files self-document where they
+  // came from and when they were exported.
+  const slugify = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
+  const todayStamp = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const resolveExportScope = (boardId: string | null | undefined) => {
+    const date = todayStamp();
     if (boardId === undefined) {
-      exportRows = filtered;
-      filename = 'prospect-hub.csv';
-    } else if (boardId === null) {
-      exportRows = visibleBoards.flatMap((b) => boardProspects[b.id] ?? []);
-      filename = 'prospect-hub-all-boards.csv';
-    } else {
-      exportRows = boardProspects[boardId] ?? [];
-      const board = boards.find((b) => b.id === boardId);
-      const safeName = (board?.name ?? boardId).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
-      filename = `prospect-hub-${safeName || 'board'}.csv`;
+      // Current view — derive name from whichever board / folder we're looking at.
+      const namePart = activeBoard
+        ? slugify(activeBoard.name)
+        : folderView
+          ? slugify(folderView.name)
+          : 'prospects';
+      return { rows: filtered, base: `${namePart || 'prospects'}-${date}` };
     }
+    if (boardId === null) return { rows: visibleBoards.flatMap((b) => boardProspects[b.id] ?? []), base: `all-boards-${date}` };
+    const board = boards.find((b) => b.id === boardId);
+    const safeName = slugify(board?.name ?? boardId);
+    return { rows: boardProspects[boardId] ?? [], base: `${safeName || 'board'}-${date}` };
+  };
+
+  const exportCsv = (boardId: string | null | undefined = undefined) => {
+    const { rows: exportRows, base } = resolveExportScope(boardId);
     const headers = columns.map((c) => c.label).join(',');
     const body = exportRows.map((r) =>
       columns.map((c) => `"${getCellValue(r, c.key).replace(/"/g, '""')}"`).join(',')
     );
     const blob = new Blob([[headers, ...body].join('\n')], { type: 'text/csv' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${base}.csv`; a.click();
   };
+
+  const exportXlsx = (boardId: string | null | undefined = undefined) => {
+    const { rows: exportRows, base } = resolveExportScope(boardId);
+    const headers = columns.map((c) => c.label);
+
+    // Build the sheet first with raw values, then style every cell.
+    // Money columns are stored as real numbers so Excel sums/sorts correctly.
+    const aoa: (string | number)[][] = [
+      headers,
+      ...exportRows.map((r) => columns.map((c) => {
+        const v = getCellValue(r, c.key);
+        if (c.key === 'askingRent' || c.key === 'askingPrice') {
+          const n = parseMoney(v);
+          return n > 0 ? n : '';
+        }
+        return v;
+      })),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+    // ── Style helpers (xlsx colors are 'FFRRGGBB' — no leading #) ────────────
+    const rgb = (hex: string) => 'FF' + hex.replace('#', '').toUpperCase();
+    const thin = { style: 'thin', color: { rgb: rgb('#E5E7EB') } } as const;
+    const cellBorder = { top: thin, bottom: thin, left: thin, right: thin } as const;
+
+    // Mirrors the in-app badge styles (CALLING_STATUS_STYLE et al).
+    const PILLS: Record<string, Record<string, { bg: string; text: string }>> = {
+      callingStatus: {
+        Positive: { bg: '#DCFCE7', text: '#16A34A' },
+        Negative: { bg: '#FEE2E2', text: '#DC2626' },
+        Neutral:  { bg: '#FEF9C3', text: '#CA8A04' },
+      },
+      listingType: {
+        Rent: { bg: '#FFEDD5', text: '#EA580C' },
+        Sale: { bg: '#F3F4F6', text: '#374151' },
+      },
+      furnishing: {
+        'Fully Furnished':  { bg: '#DBEAFE', text: '#1D4ED8' },
+        'Partly Furnished': { bg: '#DCFCE7', text: '#15803D' },
+        'Bare Unit':        { bg: '#F3F4F6', text: '#374151' },
+      },
+      availability: {
+        'Available':     { bg: '#DCFCE7', text: '#16A34A' },
+        'NOT Available': { bg: '#FEE2E2', text: '#DC2626' },
+      },
+    };
+
+    // ── Header row ──
+    for (let c = 0; c < headers.length; c++) {
+      const ref = XLSX.utils.encode_cell({ r: 0, c });
+      if (!ws[ref]) ws[ref] = { v: headers[c], t: 's' };
+      ws[ref].s = {
+        font: { bold: true, color: { rgb: rgb('#FFFFFF') }, sz: 11, name: 'Calibri' },
+        fill: { fgColor: { rgb: rgb('#1EC9C4') } },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+        border: cellBorder,
+      };
+    }
+
+    // ── Body rows ──
+    for (let r = 0; r < exportRows.length; r++) {
+      const row = exportRows[r];
+      const stripe = r % 2 === 1;
+      for (let c = 0; c < columns.length; c++) {
+        const col = columns[c];
+        const ref = XLSX.utils.encode_cell({ r: r + 1, c });
+        if (!ws[ref]) ws[ref] = { v: '', t: 's' };
+        const raw = getCellValue(row, col.key);
+
+        // Default body style — alternating row tint, soft borders.
+        const style: Record<string, unknown> = {
+          font: { color: { rgb: rgb('#374151') }, sz: 10, name: 'Calibri' },
+          fill: { fgColor: { rgb: rgb(stripe ? '#FFFFFF' : '#F0FFFE') } },
+          alignment: {
+            horizontal: col.align === 'center' ? 'center' : 'left',
+            vertical: 'center',
+            wrapText: false,
+          },
+          border: cellBorder,
+        };
+
+        // Pill columns — bold colored text on a pastel fill.
+        const map = col.selectKey ? PILLS[col.selectKey] : null;
+        if (map) {
+          if (col.selectKey === 'listingType') {
+            const tags = raw.split(',').map((s) => s.trim()).filter(Boolean);
+            if (tags.length === 1 && map[tags[0]]) {
+              const p = map[tags[0]];
+              style.fill = { fgColor: { rgb: rgb(p.bg) } };
+              style.font = { color: { rgb: rgb(p.text) }, bold: true, sz: 10, name: 'Calibri' };
+              (style.alignment as Record<string, unknown>).horizontal = 'center';
+            }
+          } else if (raw && map[raw]) {
+            const p = map[raw];
+            style.fill = { fgColor: { rgb: rgb(p.bg) } };
+            style.font = { color: { rgb: rgb(p.text) }, bold: true, sz: 10, name: 'Calibri' };
+            (style.alignment as Record<string, unknown>).horizontal = 'center';
+          }
+        }
+
+        // Agent column — color the pill from the matching preset (palette keys only;
+        // custom-hex agents fall back to plain bold text).
+        if (col.key === 'agent' && raw) {
+          const preset = agentPresets.find((p) => p.name === raw);
+          const palette = preset && AGENT_COLOR_PALETTE[preset.color];
+          if (palette) {
+            style.fill = { fgColor: { rgb: rgb(palette.bg) } };
+            style.font = { color: { rgb: rgb(palette.text) }, bold: true, sz: 10, name: 'Calibri' };
+            (style.alignment as Record<string, unknown>).horizontal = 'center';
+          }
+        }
+
+        // Money columns — number type with RM format, right-aligned mono.
+        if (col.key === 'askingRent' || col.key === 'askingPrice') {
+          const n = parseMoney(raw);
+          if (n > 0) {
+            ws[ref].t = 'n';
+            ws[ref].v = n;
+            ws[ref].z = '"RM "#,##0';
+          }
+          (style.alignment as Record<string, unknown>).horizontal = 'right';
+          style.font = { ...(style.font as object), name: 'JetBrains Mono' };
+        } else if (col.mono) {
+          style.font = { ...(style.font as object), name: 'JetBrains Mono' };
+        }
+
+        ws[ref].s = style;
+      }
+    }
+
+    // ── Column widths ──
+    ws['!cols'] = headers.map((h, i) => {
+      const sample = aoa.slice(1, 201).map((row) => String(row[i] ?? '').length);
+      const maxLen = Math.max(h.length, ...sample, 10);
+      return { wch: Math.min(maxLen + 4, 42) };
+    });
+
+    // ── Row heights — taller header, comfortable body. ──
+    ws['!rows'] = [{ hpt: 28 }, ...exportRows.map(() => ({ hpt: 20 }))];
+
+    // ── Header autofilter ──
+    const lastCol = XLSX.utils.encode_col(headers.length - 1);
+    ws['!autofilter'] = { ref: `A1:${lastCol}${exportRows.length + 1}` };
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Prospects');
+
+    // ── Freeze the header row so it stays visible while scrolling. ──
+    if (!wb.Workbook) wb.Workbook = {};
+    wb.Workbook.Views = [{ RTL: false }];
+    wb.Workbook.Sheets = [{
+      Hidden: 0,
+      Views: [{ RTL: false, FrozenPane: { xSplit: 0, ySplit: 1, state: 'frozen', topLeftCell: 'A2', activePane: 'bottomLeft' } } as never],
+    }];
+
+    XLSX.writeFile(wb, `${base}.xlsx`);
+  };
+
 
   // ── Import handler ────────────────────────────────────────────────────────
   const handleImport = (imported: Prospect[], mode: ImportMode) => {
@@ -3560,12 +3890,12 @@ export default function ProspectHub() {
             </button>
           )}
 
-          {/* Export Data — gated by data.export. Exports the currently filtered rows. */}
+          {/* Export Data — gated by data.export. Opens a format picker modal. */}
           {can('data.export') && (
             <button
-              onClick={() => exportCsv()}
+              onClick={() => setShowExport(true)}
               disabled={filtered.length === 0}
-              title={filtered.length === 0 ? 'Nothing to export' : `Export ${filtered.length} ${filtered.length === 1 ? 'row' : 'rows'} as CSV`}
+              title={filtered.length === 0 ? 'Nothing to export' : `Export ${filtered.length} ${filtered.length === 1 ? 'row' : 'rows'}`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-medium text-gray-600 hover:border-[#1EC9C4] hover:text-[#1EC9C4] bg-white transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
               <Download size={13} /> Export Data
             </button>
@@ -3577,12 +3907,14 @@ export default function ProspectHub() {
       {view === 'board' && (
         <BoardOverview
           boards={visibleBoards}
-          folders={folders.filter((f) => f.ownerEmail.toLowerCase() === myEmail)}
+          folders={visibleFolders}
+          folderMemberCounts={Object.fromEntries(visibleFolders.map((f) => [f.id, (folderMembers[f.id] ?? []).length]))}
           collapsedFolders={collapsedFolders}
           memberCounts={memberCounts}
           updatedPcts={updatedPcts}
           onOpenBoard={openBoard}
           onManageBoard={(b) => setManageBoardId(b.id)}
+          onManageFolder={(f) => setManageFolderId(f.id)}
           onAddBoard={() => setShowNewBoard(true)}
           arrangeMode={arrangeMode}
           onToggleArrange={() => setArrangeMode((v) => !v)}
@@ -3609,6 +3941,8 @@ export default function ProspectHub() {
             foldersDelete:       can('folders.delete'),
             foldersAssignBoards: can('folders.assign_boards'),
             foldersViewCombined: can('folders.view_combined'),
+            // Show the manage gear if the user can do anything to the folder.
+            foldersManage: can('folders.edit') || can('folders.delete') || can('folders.invite_members') || can('folders.remove_members'),
             dataDemo:            can('data.demo'),
           }}
         />
@@ -3903,27 +4237,18 @@ export default function ProspectHub() {
 
       {/* ── Modals ────────────────────────────────────────────────── */}
       {showImport   && <ImportModal   onClose={() => setShowImport(false)}   onImport={handleImport} />}
-      {showAddField && <AddFieldModal onClose={() => setShowAddField(false)} onAdd={addCustomField} />}
-      {showNewBoard && <NewBoardModal onClose={() => setShowNewBoard(false)} onCreate={createBoard} />}
-      {showManageBoards && (
-        <ManageBoardsModal
-          boards={visibleBoards}
-          onClose={() => setShowManageBoards(false)}
-          onReorder={(newVisible) => {
-            const visibleIds = new Set(newVisible.map((b) => b.id));
-            const invisible = boards.filter((b) => !visibleIds.has(b.id));
-            setBoards([...newVisible, ...invisible]);
-          }}
-          onDelete={deleteBoard}
-          onAddBoard={() => { setShowManageBoards(false); setShowNewBoard(true); }}
-          onExport={(boardId) => { exportCsv(boardId); }}
-          perms={{
-            boardsCreate: can('boards.create'),
-            boardsDelete: can('boards.delete'),
-            dataExport:   can('data.export'),
+      {showExport   && (
+        <ExportModal
+          rowCount={filtered.length}
+          onClose={() => setShowExport(false)}
+          onExport={(format) => {
+            if (format === 'csv') exportCsv();
+            else exportXlsx();
           }}
         />
       )}
+      {showAddField && <AddFieldModal onClose={() => setShowAddField(false)} onAdd={addCustomField} />}
+      {showNewBoard && <NewBoardModal onClose={() => setShowNewBoard(false)} onCreate={createBoard} />}
       {manageBoardId && (() => {
         const b = boards.find((x) => x.id === manageBoardId);
         if (!b) return null;
@@ -3943,6 +4268,29 @@ export default function ProspectHub() {
               setBoardMembers((prev) => { const { [b.id]: _drop, ...rest } = prev; return rest; });
               setManageBoardId(null);
             }}
+          />
+        );
+      })()}
+
+      {manageFolderId && (() => {
+        const f = folders.find((x) => x.id === manageFolderId);
+        if (!f) return null;
+        return (
+          <ManageFolderModal
+            folder={f}
+            ownerEmail={f.ownerEmail}
+            ownerName={f.ownerName ?? f.ownerEmail.split('@')[0]}
+            members={folderMembers[f.id] ?? []}
+            boardCount={boards.filter((b) => b.folderId === f.id).length}
+            canRename={can('folders.edit')}
+            canInvite={can('folders.invite_members')}
+            canRemoveMembers={can('folders.remove_members')}
+            canDelete={can('folders.delete')}
+            onClose={() => setManageFolderId(null)}
+            onRename={(name) => renameFolder(f.id, name)}
+            onInvite={(email, role) => inviteFolderMember(f.id, email, role)}
+            onRemoveMember={(memberId) => removeFolderMember(f.id, memberId)}
+            onDelete={() => { deleteFolder(f.id); setManageFolderId(null); }}
           />
         );
       })()}
