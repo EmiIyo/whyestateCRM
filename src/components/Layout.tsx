@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useState, useRef, useEffect } from 'react';
+import { NavLink, useNavigate } from 'react-router-dom';
+import { signOut as authSignOut, getCurrentUser, setNickname } from '@/lib/auth';
+import { getUserRole, ROLES, type Role } from '@/lib/permissions';
 import {
   LayoutDashboard,
   Target,
@@ -8,8 +10,18 @@ import {
   ChevronLeft,
   ChevronRight,
   LogOut,
-  Plus,
   Menu,
+  Shield,
+  Settings,
+  FileText,
+  Home,
+  Users,
+  DollarSign,
+  Calendar,
+  Folder,
+  Pencil,
+  Check as CheckIcon,
+  X,
 } from 'lucide-react';
 import { ROUTE_PATHS } from '@/lib/index';
 import {
@@ -19,15 +31,45 @@ import {
 } from '@/components/ui/tooltip';
 
 // ─── Nav definition ──────────────────────────────────────────────────────────
-const navItems: Array<{
-  label: string;
-  icon: React.ElementType;
-  path: string;
-  badge: string | null;
-}> = [
-  { label: 'Dashboard',    icon: LayoutDashboard, path: ROUTE_PATHS.DASHBOARD, badge: null },
-  { label: 'Prospect Hub', icon: Target,          path: ROUTE_PATHS.LEADS,     badge: '20' },
+type NavDef = { label: string; icon: React.ElementType; path: string; badge: string | null };
+
+const navItems: NavDef[] = [
+  { label: 'Dashboard',    icon: LayoutDashboard, path: ROUTE_PATHS.DASHBOARD,  badge: null },
+  { label: 'Prospect Hub', icon: Target,          path: ROUTE_PATHS.LEADS,      badge: null },
+  { label: 'Deals',        icon: FileText,        path: ROUTE_PATHS.DEALS,      badge: null },
+  { label: 'Properties',   icon: Home,            path: ROUTE_PATHS.LISTINGS,   badge: null },
+  { label: 'Clients',      icon: Users,           path: ROUTE_PATHS.CONTACTS,   badge: null },
+  { label: 'Commission',   icon: DollarSign,      path: ROUTE_PATHS.COMMISSION, badge: null },
+  { label: 'Viewings',     icon: Calendar,        path: ROUTE_PATHS.CALENDAR,   badge: null },
+  { label: 'Documents',    icon: Folder,          path: ROUTE_PATHS.DOCUMENTS,  badge: null },
 ];
+
+// Admin Control is restricted to the master-admin account.
+const MASTER_ADMIN_EMAIL = 'linux@whyestate.com';
+
+const secondaryNavItems: NavDef[] = [
+  { label: 'Admin Control', icon: Shield,   path: ROUTE_PATHS.ADMIN,    badge: null },
+  { label: 'Settings',      icon: Settings, path: ROUTE_PATHS.SETTINGS, badge: null },
+];
+
+function isMasterAdmin(email: string | undefined): boolean {
+  return (email ?? '').toLowerCase() === MASTER_ADMIN_EMAIL;
+}
+
+// Resolve the actual role for a given email — master-admin email overrides
+// whatever is stored, otherwise read from the per-user role assignment.
+function resolveRole(email: string | undefined): Role {
+  if (isMasterAdmin(email)) return 'master_admin';
+  return email ? getUserRole(email) : 'viewer';
+}
+
+function roleLabel(role: Role): string {
+  return ROLES.find((r) => r.id === role)?.label ?? 'Member';
+}
+
+function roleTone(role: Role): { bg: string; text: string } {
+  return ROLES.find((r) => r.id === role)?.tone ?? { bg: '#F3F4F6', text: '#374151' };
+}
 
 // ─── Sidebar width states ─────────────────────────────────────────────────────
 // 'expanded' = 256px, 'collapsed' = 64px (icon rail), 'hidden' = 0px
@@ -44,64 +86,78 @@ function NavItem({
   item,
   collapsed,
 }: {
-  item: typeof navItems[0];
+  item: NavDef;
   collapsed: boolean;
 }) {
   const Icon = item.icon;
 
-  const inner = (isActive: boolean) => (
-    <span
-      style={
-        isActive
-          ? {
-              background: '#DAF3F2',
-              borderRadius: '0 10px 10px 0',
-              color: '#1EC9C4',
-              boxShadow: '0 2px 8px rgba(30,201,196,0.12)',
-            }
-          : {}
-      }
-      className={[
-        'flex items-center gap-3 py-2.5 pr-3 transition-all duration-150 cursor-pointer relative',
-        isActive ? 'pl-3' : 'pl-3 text-[#4B4F55] hover:text-[#1EC9C4] hover:bg-[#F5F7FA] rounded-r-[10px]',
-      ].join(' ')}
-    >
-      {/* Active left bar */}
-      {isActive && (
+  const inner = (isActive: boolean) => {
+    if (collapsed) {
+      return (
         <span
-          className="absolute left-0 top-1 bottom-1 w-1 rounded-r-full"
-          style={{ background: '#1EC9C4' }}
+          className="flex items-center justify-center mx-auto w-10 h-10 rounded-xl transition-all duration-150 cursor-pointer"
+          style={
+            isActive
+              ? { background: '#DAF3F2', boxShadow: '0 2px 8px rgba(30,201,196,0.12)' }
+              : {}
+          }
+        >
+          <Icon
+            size={18}
+            className="flex-shrink-0"
+            style={{ color: isActive ? '#1EC9C4' : '#4B4F55' }}
+          />
+        </span>
+      );
+    }
+
+    return (
+      <span
+        style={
+          isActive
+            ? {
+                background: '#1EC9C4',
+                color: 'white',
+                boxShadow: '0 4px 14px rgba(30,201,196,0.35)',
+              }
+            : {}
+        }
+        className={[
+          'flex items-center gap-3 px-3 py-2.5 transition-all duration-150 cursor-pointer rounded-full',
+          isActive ? '' : 'text-[#4B4F55] hover:text-[#1EC9C4] hover:bg-[#F5F7FA]',
+        ].join(' ')}
+      >
+        <Icon
+          size={17}
+          className="flex-shrink-0"
+          style={{ color: isActive ? 'white' : undefined }}
         />
-      )}
 
-      <Icon
-        size={17}
-        className="flex-shrink-0"
-        style={{ color: isActive ? '#1EC9C4' : undefined }}
-      />
-
-      {!collapsed && (
         <span
-          className="text-sm font-medium flex-1 whitespace-nowrap"
-          style={{ color: isActive ? '#1EC9C4' : '#4B4F55' }}
+          className="text-sm font-semibold flex-1 whitespace-nowrap"
+          style={{ color: isActive ? 'white' : '#4B4F55' }}
         >
           {item.label}
         </span>
-      )}
 
-      {!collapsed && item.badge && (
-        <span
-          className="text-xs font-semibold px-2 py-0.5 rounded-full"
-          style={{ background: '#E3F2FC', color: '#3D8FF4' }}
-        >
-          {item.badge}
-        </span>
-      )}
-    </span>
-  );
+        {item.badge && !isActive && (
+          <span
+            className="text-xs font-semibold px-2 py-0.5 rounded-full"
+            style={{ background: '#E3F2FC', color: '#3D8FF4' }}
+          >
+            {item.badge}
+          </span>
+        )}
+
+        {isActive && (
+          <ChevronRight size={14} strokeWidth={2.5} className="flex-shrink-0 text-white" />
+        )}
+      </span>
+    );
+  };
 
   const link = (
-    <NavLink to={item.path} className="block w-full pr-3">
+    <NavLink to={item.path} className={collapsed ? 'block w-full' : 'block w-full px-3'}>
       {({ isActive }) => inner(isActive)}
     </NavLink>
   );
@@ -119,63 +175,113 @@ function NavItem({
 
 // ─── User Profile Card ────────────────────────────────────────────────────────
 function UserCard({ collapsed }: { collapsed: boolean }) {
+  const navigate = useNavigate();
+  const user = getCurrentUser();
+  const userName = user?.name || 'LinuxLin';
+  const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase();
+  const userRoleResolved = resolveRole(user?.email);
+  const USER_ROLE = roleLabel(userRoleResolved);
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft]     = useState(userName);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
+
+  const handleSignOut = () => {
+    authSignOut();
+    navigate(ROUTE_PATHS.HOME, { replace: true });
+  };
+
+  const startEdit = () => { setDraft(userName); setEditing(true); };
+  const cancelEdit = () => { setDraft(userName); setEditing(false); };
+  const saveEdit = () => {
+    const next = draft.trim();
+    if (!next || next === userName) { cancelEdit(); return; }
+    setNickname(next);
+    // Reload so the Agent column on every prospect grid reflects the new name.
+    window.location.reload();
+  };
+
   if (collapsed) {
     return (
-      <div className="px-2 pb-4">
+      <div className="px-2 pb-4 space-y-2">
         <Tooltip>
           <TooltipTrigger asChild>
             <div
               className="w-9 h-9 rounded-full flex items-center justify-center mx-auto cursor-default"
-              style={{ background: '#DAF3F2' }}
+              style={{ background: '#1EC9C4' }}
             >
-              <span className="text-xs font-bold" style={{ color: '#1EC9C4' }}>AZ</span>
+              <span className="text-xs font-bold text-white">{userInitials}</span>
             </div>
           </TooltipTrigger>
-          <TooltipContent side="right">Ahmad Zulkifli · Senior Agent</TooltipContent>
+          <TooltipContent side="right">{userName} · {USER_ROLE}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button onClick={handleSignOut} className="w-9 h-9 rounded-xl flex items-center justify-center mx-auto hover:bg-[#F5F7FA] transition-colors">
+              <LogOut size={15} style={{ color: '#A1A9B6' }} />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Sign Out</TooltipContent>
         </Tooltip>
       </div>
     );
   }
 
   return (
-    <div className="px-3 pb-4 space-y-3">
-      {/* Card */}
-      <div
-        className="rounded-2xl p-4"
-        style={{ background: 'linear-gradient(135deg, #27B1AD 0%, #1EC9C4 100%)' }}
-      >
-        {/* Avatar + name */}
-        <div className="flex items-center gap-3 mb-3">
-          <div
-            className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ background: 'rgba(255,255,255,0.25)' }}
-          >
-            <span className="text-sm font-bold text-white">AZ</span>
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-bold text-white leading-tight truncate">Ahmad Zulkifli</p>
-            <p className="text-xs text-white/70 leading-tight">REN: 12345 · Senior</p>
-          </div>
+    <div className="px-3 pb-4 pt-3 border-t" style={{ borderColor: '#E8EBEF' }}>
+      {/* User identity (click name to edit nickname) */}
+      <div className="flex items-center gap-2.5 px-1 py-2 group">
+        <div
+          className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+          style={{ background: '#1EC9C4' }}
+        >
+          <span className="text-xs font-bold text-white">{userInitials}</span>
         </div>
-
-        {/* Progress */}
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-white/80">April Target</span>
-            <span className="text-xs font-bold text-white">72% reached</span>
-          </div>
-          <div className="h-1.5 rounded-full" style={{ background: 'rgba(255,255,255,0.25)' }}>
-            <div
-              className="h-full rounded-full"
-              style={{ width: '72%', background: 'rgba(255,255,255,0.85)' }}
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={saveEdit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') saveEdit();
+                if (e.key === 'Escape') cancelEdit();
+              }}
+              maxLength={32}
+              className="w-full text-sm font-bold border-b outline-none bg-transparent"
+              style={{ color: '#2B3340', borderColor: '#1EC9C4' }}
             />
-          </div>
-          <p className="text-xs text-white/60 mt-1">RM 210K / 291K</p>
+          ) : (
+            <button
+              onClick={startEdit}
+              title="Click to edit nickname"
+              className="text-sm font-bold truncate text-left w-full hover:text-[#1EC9C4] transition-colors flex items-center gap-1.5"
+              style={{ color: '#2B3340' }}
+            >
+              <span className="truncate">{userName}</span>
+              <Pencil size={11} className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" style={{ color: '#A1A9B6' }} />
+            </button>
+          )}
+          <p className="text-xs truncate" style={{ color: '#A1A9B6' }}>{USER_ROLE}</p>
         </div>
+        {editing && (
+          <div className="flex items-center gap-0.5 flex-shrink-0">
+            <button onMouseDown={(e) => { e.preventDefault(); saveEdit(); }} title="Save" className="p-1 rounded hover:bg-gray-100">
+              <CheckIcon size={12} style={{ color: '#1EC9C4' }} strokeWidth={3} />
+            </button>
+            <button onMouseDown={(e) => { e.preventDefault(); cancelEdit(); }} title="Cancel" className="p-1 rounded hover:bg-gray-100">
+              <X size={12} style={{ color: '#A1A9B6' }} />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Sign out */}
-      <button className="flex items-center gap-2 w-full px-1 py-1.5 rounded-lg hover:bg-[#F5F7FA] transition-colors">
+      <button
+        onClick={handleSignOut}
+        className="flex items-center gap-2 w-full px-1 py-1.5 rounded-lg hover:bg-[#F5F7FA] transition-colors mt-1">
         <LogOut size={15} style={{ color: '#A1A9B6' }} />
         <span className="text-sm" style={{ color: '#A1A9B6' }}>Sign Out</span>
       </button>
@@ -194,6 +300,12 @@ function Sidebar({
   const collapsed = state === 'collapsed';
   const width = sidebarPx(state);
 
+  // Hide Admin Control unless the current user is the master admin.
+  const me = getCurrentUser();
+  const visibleSecondary = secondaryNavItems.filter((item) =>
+    item.path === ROUTE_PATHS.ADMIN ? isMasterAdmin(me?.email) : true
+  );
+
   return (
     <>
       {/* Sidebar panel */}
@@ -207,30 +319,33 @@ function Sidebar({
         className="flex flex-col h-screen fixed left-0 top-0 z-40 overflow-hidden"
       >
         {/* Logo row */}
-        <div className="h-16 flex items-center px-4 flex-shrink-0" style={{ borderBottom: '1px solid #E8EBEF' }}>
+        <div
+          className={[
+            'h-16 flex items-center flex-shrink-0',
+            collapsed ? 'justify-center px-0' : 'justify-start px-4',
+          ].join(' ')}
+          style={{ borderBottom: '1px solid #E8EBEF' }}
+        >
           {collapsed ? (
-            <span className="text-lg font-black" style={{ color: '#1EC9C4' }}>W</span>
+            <img src="/logo-icon.png" alt="whyEstate" className="h-8 w-8 select-none" draggable={false} />
           ) : (
-            <span className="flex items-baseline gap-0.5 select-none">
-              <span className="text-xl font-black" style={{ color: '#1EC9C4' }}>why</span>
-              <span className="text-xl font-semibold" style={{ color: '#4B4F55' }}>Estate</span>
-            </span>
+            <img src="/logo-wordmark.png" alt="whyEstate" className="h-12 w-auto select-none" draggable={false} />
           )}
         </div>
 
-        {/* Menu label */}
-        {!collapsed && (
-          <p className="text-xs font-semibold uppercase tracking-widest px-4 pt-5 pb-2" style={{ color: '#A1A9B6' }}>
-            Menu
-          </p>
-        )}
-
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto overflow-x-hidden py-1 space-y-0.5">
+        {/* Main nav */}
+        <nav className="flex-1 overflow-y-auto overflow-x-hidden pt-3 pb-1 space-y-0.5">
           {navItems.map((item) => (
             <NavItem key={item.path} item={item} collapsed={collapsed} />
           ))}
         </nav>
+
+        {/* Secondary nav (admin / settings) — admin shown only to master admin */}
+        <div className="pt-2 pb-1 space-y-0.5 border-t" style={{ borderColor: '#E8EBEF' }}>
+          {visibleSecondary.map((item) => (
+            <NavItem key={item.path} item={item} collapsed={collapsed} />
+          ))}
+        </div>
 
         {/* User card */}
         <UserCard collapsed={collapsed} />
@@ -281,13 +396,28 @@ function TopBar({
   sidebarHidden: boolean;
   onShowSidebar: () => void;
 }) {
-  const today = new Date();
-  const formatted = today.toLocaleDateString('en-MY', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
+  const navigate = useNavigate();
+  const me = getCurrentUser();
+  const userName     = me?.name || 'User';
+  const userEmail    = me?.email || '';
+  const userRoleId   = resolveRole(userEmail);
+  const userRoleLbl  = roleLabel(userRoleId);
+  const userRoleStyle = roleTone(userRoleId);
+  const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || 'U';
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [menuOpen]);
+
+  const handleSignOut = () => {
+    authSignOut();
+    navigate(ROUTE_PATHS.HOME, { replace: true });
+  };
 
   return (
     <header
@@ -311,11 +441,7 @@ function TopBar({
         </button>
       )}
 
-      {/* Title */}
-      <div className="flex-1 min-w-0">
-        <h1 className="text-xl font-bold truncate" style={{ color: '#4B4F55' }}>Dashboard</h1>
-        <p className="text-xs truncate" style={{ color: '#A1A9B6' }}>{formatted} · KL &amp; Selangor Market</p>
-      </div>
+      <div className="flex-1" />
 
       {/* Bell */}
       <button className="relative p-2 rounded-lg hover:bg-[#F5F7FA] transition-colors flex-shrink-0">
@@ -326,29 +452,57 @@ function TopBar({
         />
       </button>
 
-      {/* User */}
-      <button className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl hover:bg-[#F5F7FA] transition-colors flex-shrink-0">
-        <div
-          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
-          style={{ background: '#DAF3F2' }}
-        >
-          <span className="text-xs font-bold" style={{ color: '#1EC9C4' }}>AZ</span>
-        </div>
-        <div className="hidden sm:block text-left">
-          <p className="text-sm font-semibold leading-tight" style={{ color: '#4B4F55' }}>Ahmad Zulkifli</p>
-          <p className="text-xs leading-tight" style={{ color: '#A1A9B6' }}>Senior Agent</p>
-        </div>
-        <ChevronDown size={14} style={{ color: '#A1A9B6' }} />
-      </button>
+      {/* User profile button + dropdown */}
+      <div ref={menuRef} className="relative flex-shrink-0">
+        <button
+          onClick={() => setMenuOpen((o) => !o)}
+          className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl hover:bg-[#F5F7FA] transition-colors">
+          <div
+            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
+            style={{ background: '#1EC9C4' }}>
+            <span className="text-xs font-bold text-white">{userInitials}</span>
+          </div>
+          <div className="hidden sm:block text-left">
+            <p className="text-sm font-semibold leading-tight" style={{ color: '#4B4F55' }}>{userName}</p>
+            <p className="text-xs leading-tight" style={{ color: '#A1A9B6' }}>{userRoleLbl}</p>
+          </div>
+          <ChevronDown size={14} style={{ color: '#A1A9B6' }} />
+        </button>
 
-      {/* New Deal button */}
-      <button
-        className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-opacity hover:opacity-90 flex-shrink-0"
-        style={{ background: '#1EC9C4' }}
-      >
-        <Plus size={15} strokeWidth={2.5} />
-        New Deal
-      </button>
+        {menuOpen && (
+          <div
+            className="absolute right-0 top-full mt-1 min-w-[220px] bg-white rounded-xl border border-gray-100 py-1 z-50"
+            style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}>
+            <div className="px-3 py-2.5 border-b border-gray-100">
+              <p className="text-sm font-bold truncate" style={{ color: '#2B3340' }}>{userName}</p>
+              <p className="text-xs truncate" style={{ color: '#9CA3AF' }}>{userEmail}</p>
+              <span className="inline-block mt-1.5 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                style={{ background: userRoleStyle.bg, color: userRoleStyle.text }}>
+                {userRoleLbl}
+              </span>
+            </div>
+            {isMasterAdmin(userEmail) && (
+              <button onClick={() => { setMenuOpen(false); navigate(ROUTE_PATHS.ADMIN); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-gray-50 transition-colors text-left"
+                style={{ color: '#374151' }}>
+                <Shield size={13} className="text-gray-400" /> Admin Control
+              </button>
+            )}
+            <button onClick={() => { setMenuOpen(false); navigate(ROUTE_PATHS.SETTINGS); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-gray-50 transition-colors text-left"
+              style={{ color: '#374151' }}>
+              <Settings size={13} className="text-gray-400" /> Settings
+            </button>
+            <div className="my-1 border-t border-gray-100" />
+            <button onClick={() => { setMenuOpen(false); handleSignOut(); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-red-50 transition-colors text-left"
+              style={{ color: '#DC2626' }}>
+              <LogOut size={13} /> Sign Out
+            </button>
+          </div>
+        )}
+      </div>
+
     </header>
   );
 }

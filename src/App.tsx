@@ -2,17 +2,14 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
+import { HashRouter, Routes, Route } from "react-router-dom";
 import { ROUTE_PATHS } from "@/lib/index";
 import Layout from "@/components/Layout";
-import Dashboard from "@/pages/Dashboard";
+import RequireAuth from "@/components/RequireAuth";
+import Landing from "@/pages/Landing";
 import ProspectHub from "@/pages/ProspectHub";
-import Listings from "@/pages/Listings";
-import Contacts from "@/pages/Contacts";
-import Tenancy from "@/pages/Tenancy";
-import CalendarPage from "@/pages/Calendar";
-import Reports from "@/pages/Reports";
-import SettingsPage from "@/pages/SettingsPage";
+import AdminControl from "@/pages/AdminControl";
+import UnderDevelopment from "@/pages/UnderDevelopment";
 import NotFound from "./pages/not-found/Index";
 
 const queryClient = new QueryClient();
@@ -24,18 +21,24 @@ const App = () => (
       <Sonner />
       <HashRouter>
         <Routes>
-          {/* Redirect root to dashboard */}
-          <Route path={ROUTE_PATHS.HOME} element={<Navigate to={ROUTE_PATHS.DASHBOARD} replace />} />
+          {/* Public landing page — auth modal lives inside */}
+          <Route path={ROUTE_PATHS.HOME} element={<Landing />} />
 
-          {/* CRM Routes — all wrapped in Layout */}
-          <Route path={ROUTE_PATHS.DASHBOARD} element={<Layout><Dashboard /></Layout>} />
-          <Route path={ROUTE_PATHS.LEADS} element={<Layout><ProspectHub /></Layout>} />
-          <Route path={ROUTE_PATHS.LISTINGS} element={<Layout><Listings /></Layout>} />
-          <Route path={ROUTE_PATHS.CONTACTS} element={<Layout><Contacts /></Layout>} />
-          <Route path={ROUTE_PATHS.TENANCY} element={<Layout><Tenancy /></Layout>} />
-          <Route path={ROUTE_PATHS.CALENDAR} element={<Layout><CalendarPage /></Layout>} />
-          <Route path={ROUTE_PATHS.REPORTS} element={<Layout><Reports /></Layout>} />
-          <Route path={ROUTE_PATHS.SETTINGS} element={<Layout><SettingsPage /></Layout>} />
+          {/* Prospect Hub — the only fully-functional module (gated) */}
+          <Route path={ROUTE_PATHS.LEADS} element={<RequireAuth><Layout><ProspectHub /></Layout></RequireAuth>} />
+
+          {/* All other modules — under development (gated) */}
+          <Route path={ROUTE_PATHS.DASHBOARD}  element={<RequireAuth><Layout><UnderDevelopment name="Dashboard" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.LISTINGS}   element={<RequireAuth><Layout><UnderDevelopment name="Properties" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CONTACTS}   element={<RequireAuth><Layout><UnderDevelopment name="Clients" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.TENANCY}    element={<RequireAuth><Layout><UnderDevelopment name="Tenancy" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth><Layout><UnderDevelopment name="Viewings" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.REPORTS}    element={<RequireAuth><Layout><UnderDevelopment name="Reports" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.DEALS}      element={<RequireAuth><Layout><UnderDevelopment name="Deals" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.COMMISSION} element={<RequireAuth><Layout><UnderDevelopment name="Commission" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth><Layout><UnderDevelopment name="Documents" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.ADMIN}      element={<RequireAuth masterOnly><Layout><AdminControl /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.SETTINGS}   element={<RequireAuth><Layout><UnderDevelopment name="Settings" /></Layout></RequireAuth>} />
 
           {/* Catch-all */}
           <Route path="*" element={<NotFound />} />

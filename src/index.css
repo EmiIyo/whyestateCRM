@@ -4,6 +4,12 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@keyframes wiggle {
+  0%, 100% { transform: rotate(-0.6deg); }
+  50%      { transform: rotate(0.6deg); }
+}
+.wiggle { animation: wiggle 0.4s ease-in-out infinite; transform-origin: center; }
+
 :root {
   /* ── Brand ─────────────────────────────── */
   --teal:        #1EC9C4;

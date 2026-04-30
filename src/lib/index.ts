@@ -8,6 +8,10 @@ export const ROUTE_PATHS = {
   TENANCY: '/tenancy',
   CALENDAR: '/calendar',
   REPORTS: '/reports',
+  DEALS: '/deals',
+  COMMISSION: '/commission',
+  DOCUMENTS: '/documents',
+  ADMIN: '/admin',
   SETTINGS: '/settings',
 } as const;
 
