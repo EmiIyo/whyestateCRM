@@ -71,8 +71,14 @@ export function usePhotoStudio(userEmail: string) {
   const [isRunning, setIsRunning] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const photosRef = useRef(photos);
-  photosRef.current = photos;
+  // photosRef mirrors state but is updated SYNCHRONOUSLY on every patch so the
+  // pipeline (which runs as awaited promises) always sees the latest values
+  // without waiting for React to re-render. Workers in the queue rely on this
+  // to avoid stale-read-then-write races against the DB.
+  const photosRef = useRef<Map<string, PhotoState>>(new Map());
+  // Latest active batch id, also updated synchronously, used by selectBatch to
+  // bail out if the user switches batches mid-load.
+  const activeBatchIdRef = useRef<string | null>(null);
 
   // Load batch list on mount.
   useEffect(() => {
@@ -90,31 +96,10 @@ export function usePhotoStudio(userEmail: string) {
     return () => { cancel = true; };
   }, [userEmail]);
 
-  // Load photos for active batch.
-  useEffect(() => {
-    if (!activeBatchId) {
-      setPhotos(new Map());
-      return;
-    }
-    let cancel = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const items = await listBatchItems(activeBatchId);
-        if (cancel) return;
-        const next = new Map<string, PhotoState>();
-        for (const it of items) {
-          next.set(it.id, dbItemToState(it));
-        }
-        setPhotos(next);
-      } catch (e) {
-        console.error("listBatchItems failed:", e);
-      } finally {
-        if (!cancel) setLoading(false);
-      }
-    })();
-    return () => { cancel = true; };
-  }, [activeBatchId]);
+  // Loading photos is not done in a useEffect that watches activeBatchId because
+  // that would race with addFiles when both happen back-to-back. Instead the
+  // load is owned by selectBatch / newBatch / addFiles, each of which updates
+  // photosRef + photos in one synchronous step.
 
   // Cleanup object URLs when component unmounts.
   useEffect(() => {
@@ -131,13 +116,41 @@ export function usePhotoStudio(userEmail: string) {
     const name = nextBatchName();
     const b = await createBatch(userEmail, name);
     setBatches((prev) => [b, ...prev]);
+    activeBatchIdRef.current = b.id;
     setActiveBatchId(b.id);
+    // Revoke any local object URLs from a previous batch before clearing.
+    for (const p of photosRef.current.values()) {
+      if (p.originalObjectUrl) URL.revokeObjectURL(p.originalObjectUrl);
+    }
+    photosRef.current = new Map();
     setPhotos(new Map());
     return b.id;
   }, [userEmail]);
 
-  const selectBatch = useCallback((id: string) => {
+  const selectBatch = useCallback(async (id: string) => {
+    if (id === activeBatchIdRef.current) return;
+    activeBatchIdRef.current = id;
     setActiveBatchId(id);
+    // Revoke any local object URLs from the previous batch.
+    for (const p of photosRef.current.values()) {
+      if (p.originalObjectUrl) URL.revokeObjectURL(p.originalObjectUrl);
+    }
+    photosRef.current = new Map();
+    setPhotos(new Map());
+    setLoading(true);
+    try {
+      const items = await listBatchItems(id);
+      // Bail out if the user switched to another batch while we were loading.
+      if (activeBatchIdRef.current !== id) return;
+      const next = new Map<string, PhotoState>();
+      for (const it of items) next.set(it.id, dbItemToState(it));
+      photosRef.current = next;
+      setPhotos(next);
+    } catch (e) {
+      console.error("selectBatch listBatchItems failed:", e);
+    } finally {
+      if (activeBatchIdRef.current === id) setLoading(false);
+    }
   }, []);
 
   const renameBatch = useCallback(async (id: string, name: string) => {
@@ -148,11 +161,16 @@ export function usePhotoStudio(userEmail: string) {
   const deleteBatch = useCallback(async (id: string) => {
     await apiDeleteBatch(id);
     setBatches((prev) => prev.filter((b) => b.id !== id));
-    if (activeBatchId === id) {
+    if (activeBatchIdRef.current === id) {
+      activeBatchIdRef.current = null;
       setActiveBatchId(null);
+      for (const p of photosRef.current.values()) {
+        if (p.originalObjectUrl) URL.revokeObjectURL(p.originalObjectUrl);
+      }
+      photosRef.current = new Map();
       setPhotos(new Map());
     }
-  }, [activeBatchId]);
+  }, []);
 
   // ───────────────────────────────────── photo lifecycle ──
 
@@ -188,8 +206,10 @@ export function usePhotoStudio(userEmail: string) {
         origH: 0,
         error: null,
       };
+      photosRef.current.set(ps.id, ps);
       created.push(ps);
-      // Read dimensions async — non-blocking
+      // Read dimensions async — non-blocking. Local-only; runFullPipeline will
+      // re-read and persist them to DB on first process.
       loadImage(objectUrl).then((img) => {
         updatePhoto(ps.id, { origW: img.naturalWidth, origH: img.naturalHeight });
       }).catch(() => {});
@@ -201,12 +221,17 @@ export function usePhotoStudio(userEmail: string) {
     });
   }, [activeBatchId, newBatch]);
 
+  // Sync mutation: update both photosRef (immediately) and React state (next render).
   const updatePhoto = useCallback((id: string, patch: Partial<PhotoState>) => {
+    const cur = photosRef.current.get(id);
+    if (!cur) return;
+    const merged = { ...cur, ...patch };
+    photosRef.current.set(id, merged);
     setPhotos((prev) => {
-      const cur = prev.get(id);
-      if (!cur) return prev;
+      const existing = prev.get(id);
+      if (!existing) return prev;
       const next = new Map(prev);
-      next.set(id, { ...cur, ...patch });
+      next.set(id, { ...existing, ...patch });
       return next;
     });
   }, []);
@@ -218,6 +243,7 @@ export function usePhotoStudio(userEmail: string) {
       try { await deleteBatchItem(cur.itemId); } catch (e) { console.error(e); }
     }
     if (cur.originalObjectUrl) URL.revokeObjectURL(cur.originalObjectUrl);
+    photosRef.current.delete(id);
     setPhotos((prev) => {
       const next = new Map(prev);
       next.delete(id);
@@ -227,24 +253,33 @@ export function usePhotoStudio(userEmail: string) {
 
   // ───────────────────────────────────── pipeline ──
 
-  // Persist a partial change both locally and to DB.
+  // Persist a partial change both locally and to DB. Only the patched fields
+  // are written to DB — never the full row — so concurrent persist() calls on
+  // the same item don't overwrite each other's earlier writes.
   const persist = useCallback(
     async (id: string, patch: Partial<PhotoState>): Promise<void> => {
       updatePhoto(id, patch);
-      const photo = { ...photosRef.current.get(id), ...patch } as PhotoState;
-      if (!photo.itemId) return;
+      const itemId = photosRef.current.get(id)?.itemId;
+      if (!itemId) return;
+
+      // Translate PhotoState patch keys to DB column patch.
+      const dbPatch: Record<string, unknown> = {};
+      if ("status" in patch) dbPatch.status = patch.status;
+      if ("status_label" in patch) dbPatch.status_label = patch.status_label;
+      if ("error" in patch) dbPatch.error = patch.error;
+      if ("analysis" in patch) dbPatch.analysis = patch.analysis;
+      if ("origW" in patch) dbPatch.original_w = patch.origW || null;
+      if ("origH" in patch) dbPatch.original_h = patch.origH || null;
+      if ("fal_original_url" in patch) dbPatch.fal_original_url = patch.fal_original_url;
+      if ("versions" in patch) dbPatch.versions = patch.versions;
+      if ("active_version" in patch) dbPatch.active_version = patch.active_version;
+      if (Object.keys(dbPatch).length === 0) return;
+
       try {
-        await updateBatchItem(photo.itemId, {
-          status: photo.status,
-          status_label: photo.status_label,
-          error: photo.error,
-          analysis: photo.analysis,
-          original_w: photo.origW || null,
-          original_h: photo.origH || null,
-          fal_original_url: photo.fal_original_url,
-          versions: photo.versions,
-          active_version: photo.active_version,
-        });
+        await updateBatchItem(
+          itemId,
+          dbPatch as Parameters<typeof updateBatchItem>[1],
+        );
       } catch (e) {
         console.error("persist updateBatchItem failed:", e);
       }
@@ -460,15 +495,29 @@ Preserve everything else exactly as it is — composition, lighting, color, pers
   const applySurgicalEdit = useCallback(
     async (id: string, instruction: string) => {
       if (isRunning) return;
+      const cur = photosRef.current.get(id);
+      if (!cur) return;
+      // Fall back to full pipeline when there's nothing to edit on yet.
+      const hasActiveVersion = cur.active_version >= 0 && cur.versions[cur.active_version];
       ensureFalConfigured();
       setIsRunning(true);
       try {
-        await processOne(id, "edit", instruction);
+        if (!hasActiveVersion) {
+          await persist(id, {
+            status: "queued",
+            status_label: "Queued",
+            error: null,
+            analysis: null,
+          });
+          await processOne(id, "full");
+        } else {
+          await processOne(id, "edit", instruction);
+        }
       } finally {
         setIsRunning(false);
       }
     },
-    [isRunning, processOne],
+    [isRunning, persist, processOne],
   );
 
   const setActiveVersion = useCallback(
@@ -490,6 +539,7 @@ Preserve everything else exactly as it is — composition, lighting, color, pers
       }
       if (p.originalObjectUrl) URL.revokeObjectURL(p.originalObjectUrl);
     }
+    photosRef.current = new Map();
     setPhotos(new Map());
   }, [isRunning]);
 

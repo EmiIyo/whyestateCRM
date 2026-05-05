@@ -8,21 +8,39 @@
 // Only `*.fal.ai`, `*.fal.run`, and `*.fal.media` targets are allowed so this
 // proxy can't be turned into a generic open relay.
 
-const ALLOWED_HOST_SUFFIXES = [".fal.ai", ".fal.run", ".fal.media"];
+// Allow bare hosts (`fal.run`) and any subdomain (`*.fal.run`, `queue.fal.run`,
+// `rest.fal.ai`, `v3.fal.media`, …). Reject everything else.
+const ALLOWED_DOMAINS = ["fal.ai", "fal.run", "fal.media"];
 
+// Response headers we MUST drop before forwarding upstream → browser:
+// content-encoding/length/transfer-encoding because Deno fetch auto-decompresses
+// and the cached values would mismatch the actual body; connection is hop-by-hop.
+const STRIP_RESPONSE_HEADERS = new Set([
+  "content-encoding",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "keep-alive",
+]);
+
+// Wildcard for both Allow-Headers and Expose-Headers — fal client v1.10 sends
+// custom request headers (x-fal-queue-priority, x-fal-runner-region, …) that
+// we don't want to enumerate. Any header is fine since this proxy only forwards
+// to allow-listed fal hosts.
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-fal-target-url, accept",
+  "Access-Control-Allow-Headers": "*",
   "Access-Control-Expose-Headers": "*",
+  "Access-Control-Max-Age": "86400",
 };
 
 function isAllowedTarget(urlStr: string): boolean {
   try {
     const u = new URL(urlStr);
     if (u.protocol !== "https:") return false;
-    return ALLOWED_HOST_SUFFIXES.some((suffix) => u.hostname.endsWith(suffix));
+    const host = u.hostname.toLowerCase();
+    return ALLOWED_DOMAINS.some((d) => host === d || host.endsWith("." + d));
   } catch {
     return false;
   }
@@ -91,8 +109,14 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Forward upstream response, but enforce CORS so the browser can read it.
-  const respHeaders = new Headers(upstream.headers);
+  // Forward upstream response, dropping headers that would confuse the browser
+  // after Deno auto-decompressed the body, and enforcing CORS so the browser
+  // can read it.
+  const respHeaders = new Headers();
+  for (const [k, v] of upstream.headers.entries()) {
+    if (STRIP_RESPONSE_HEADERS.has(k.toLowerCase())) continue;
+    respHeaders.set(k, v);
+  }
   for (const [k, v] of Object.entries(CORS_HEADERS)) respHeaders.set(k, v);
   return new Response(upstream.body, {
     status: upstream.status,
