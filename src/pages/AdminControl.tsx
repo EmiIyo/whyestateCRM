@@ -80,8 +80,8 @@ function AdminMain({ onOpenProspectHub, onOpenUserSetting }: { onOpenProspectHub
             <Settings2 size={18} style={{ color: '#0F766E' }} />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Prospect Hub Setting</p>
-            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Configure permissions for each role</p>
+            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Permission Matrix</p>
+            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Sidebar visibility + per-role Prospect Hub controls</p>
           </div>
           <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
         </button>
@@ -694,10 +694,10 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
         <div>
           <div className="flex items-center gap-2">
             <Settings2 size={20} style={{ color: '#1EC9C4' }} />
-            <h2 className="text-2xl font-bold" style={{ color: '#1A202C' }}>Prospect Hub Setting</h2>
+            <h2 className="text-2xl font-bold" style={{ color: '#1A202C' }}>Permission Matrix</h2>
           </div>
           <p className="text-sm mt-1" style={{ color: '#9CA3AF' }}>
-            Configure what each role can do inside Prospect Hub. Master Admin always has full access.
+            Toggle which sidebar modules each role sees (Navigation group) and which actions they can take inside Prospect Hub. Master Admin always has full access.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">

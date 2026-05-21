@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { signOut as authSignOut, setNickname, useAuthStore, DEFAULT_AVATAR_COLOR } from '@/lib/auth';
-import { ROLES, type Role } from '@/lib/permissions';
+import { ROLES, type Role, canDo, usePermsStore } from '@/lib/permissions';
 import type { Enums } from '@/types/database';
 
 type UserTier = Enums<'user_tier'>;
@@ -31,18 +31,20 @@ import {
 } from '@/components/ui/tooltip';
 
 // ─── Nav definition ──────────────────────────────────────────────────────────
-type NavDef = { label: string; icon: React.ElementType; path: string; badge: string | null };
+// Each item carries the `nav.*` permission key it requires. Admins can
+// toggle these keys on/off per-role in Admin Control → Permission Matrix.
+// `permission` is optional — main nav items use it for matrix-driven
+// visibility, secondary items (Admin Control, Settings) gate themselves
+// independently (master-only / always-on).
+type NavDef = { label: string; icon: React.ElementType; path: string; badge: string | null; permission?: string };
 
 const navItems: NavDef[] = [
-  { label: 'Dashboard',     icon: LayoutDashboard, path: ROUTE_PATHS.DASHBOARD,     badge: null },
-  { label: 'Prospect Hub',  icon: Target,          path: ROUTE_PATHS.LEADS,         badge: null },
-  { label: 'Clients',       icon: Users,           path: ROUTE_PATHS.CLIENTS,       badge: null },
-  { label: 'Calendar',      icon: Calendar,        path: ROUTE_PATHS.CALENDAR,      badge: null },
-  { label: 'Documents',     icon: Folder,          path: ROUTE_PATHS.DOCUMENTS,     badge: null },
+  { label: 'Dashboard',     icon: LayoutDashboard, path: ROUTE_PATHS.DASHBOARD, badge: null, permission: 'nav.dashboard' },
+  { label: 'Prospect Hub',  icon: Target,          path: ROUTE_PATHS.LEADS,     badge: null, permission: 'nav.leads' },
+  { label: 'Clients',       icon: Users,           path: ROUTE_PATHS.CLIENTS,   badge: null, permission: 'nav.clients' },
+  { label: 'Calendar',      icon: Calendar,        path: ROUTE_PATHS.CALENDAR,  badge: null, permission: 'nav.calendar' },
+  { label: 'Documents',     icon: Folder,          path: ROUTE_PATHS.DOCUMENTS, badge: null, permission: 'nav.documents' },
 ];
-
-// Routes restricted by role. Items not listed here are visible to everyone.
-const NAV_ROLE_GATES: Partial<Record<string, Role[]>> = {};
 
 const secondaryNavItems: NavDef[] = [
   { label: 'Admin Control', icon: Shield,   path: ROUTE_PATHS.ADMIN,    badge: null },
@@ -304,18 +306,24 @@ function Sidebar({
   const collapsed = state === 'collapsed';
   const width = sidebarPx(state);
 
-  // Reactive: re-render when the user's role changes (master_admin gated).
+  // Reactive: re-render when the user's role changes (master_admin gated)
+  // OR when an admin tweaks the permission matrix.
   const profile = useAuthStore((s) => s.profile);
   const meRole: Role = profile?.role ?? 'viewer';
+  // Subscribing to `perms` keeps the sidebar in sync the moment Admin Control
+  // saves a change — no refresh required, even for the affected user.
+  const perms = usePermsStore((s) => s.perms);
 
   const visibleSecondary = useMemo(() => secondaryNavItems.filter((item) =>
     item.path === ROUTE_PATHS.ADMIN ? meRole === 'master_admin' : true
   ), [meRole]);
 
-  const visibleNav = useMemo(() => navItems.filter((item) => {
-    const gate = NAV_ROLE_GATES[item.path];
-    return !gate || gate.includes(meRole);
-  }), [meRole]);
+  const visibleNav = useMemo(
+    () => navItems.filter((item) => !item.permission || canDo(meRole, item.permission)),
+    // `perms` participates so re-render fires when the matrix shifts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [meRole, perms],
+  );
 
   return (
     <>

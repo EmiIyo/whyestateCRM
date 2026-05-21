@@ -32,18 +32,18 @@ const App = () => (
         <Routes>
           <Route path={ROUTE_PATHS.HOME} element={<Landing />} />
 
-          <Route path={ROUTE_PATHS.LEADS}      element={<RequireAuth><Layout><ProspectHub /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.DASHBOARD}  element={<RequireAuth><Layout><Dashboard /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.LEADS}      element={<RequireAuth permission="nav.leads"><Layout><ProspectHub /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.DASHBOARD}  element={<RequireAuth permission="nav.dashboard"><Layout><Dashboard /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.LISTINGS}   element={<RequireAuth><Layout><UnderDevelopment name="Properties" /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.CONTACTS}   element={<RequireAuth><Layout><ClientsPage /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.CLIENTS}    element={<RequireAuth><Layout><ClientsPage /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CONTACTS}   element={<RequireAuth permission="nav.clients"><Layout><ClientsPage /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CLIENTS}    element={<RequireAuth permission="nav.clients"><Layout><ClientsPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.TENANCY}    element={<RequireAuth><Layout><UnderDevelopment name="Tenancy" /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth><Layout><CalendarPage /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth permission="nav.calendar"><Layout><CalendarPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.REPORTS}    element={<RequireAuth><Layout><UnderDevelopment name="Reports" /></Layout></RequireAuth>} />
           {/* Deals + Commission are placeholder modules — no UI shipped yet */}
           <Route path={ROUTE_PATHS.DEALS}      element={<RequireAuth><Layout><UnderDevelopment name="Deals" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.COMMISSION} element={<RequireAuth><Layout><UnderDevelopment name="Commission" /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth><Layout><DocumentsPage /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth permission="nav.documents"><Layout><DocumentsPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.ADMIN}      element={<RequireAuth masterOnly><Layout><AdminControl /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.SETTINGS}   element={<RequireAuth><Layout><MyProfile /></Layout></RequireAuth>} />
 

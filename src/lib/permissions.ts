@@ -80,8 +80,11 @@ export async function saveRolePerms(perms: RolePerms): Promise<void> {
 
 // Factory defaults for the editable roles. Mirrors the seed in
 // migration `permissions_and_invites`.
+const NAV_DEFAULTS = ['nav.dashboard','nav.leads','nav.clients','nav.calendar','nav.documents'];
+
 const DEFAULTS = {
   admin: [
+    ...NAV_DEFAULTS,
     'boards.create','boards.edit','boards.delete','boards.reorder','boards.invite_members','boards.remove_members',
     'folders.create','folders.edit','folders.delete','folders.assign_boards','folders.view_combined','folders.invite_members','folders.remove_members',
     'rows.create','rows.edit','rows.delete','rows.duplicate','rows.bulk_delete',
@@ -92,6 +95,7 @@ const DEFAULTS = {
     'recycle.access','recycle.restore','recycle.purge',
   ],
   editor: [
+    ...NAV_DEFAULTS,
     'folders.view_combined',
     'rows.create','rows.edit','rows.duplicate',
     'columns.create','columns.edit',
@@ -101,6 +105,7 @@ const DEFAULTS = {
     'recycle.access','recycle.restore',
   ],
   viewer: [
+    ...NAV_DEFAULTS,
     'folders.view_combined',
     'data.export',
     'view.filter','view.quick_tabs',
