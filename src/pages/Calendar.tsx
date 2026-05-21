@@ -4,25 +4,23 @@ import {
   Mail, MapPin, FileText, Check, Loader2, ExternalLink, Link as LinkIcon, AlertCircle, Pencil,
 } from 'lucide-react';
 import {
-  listEvents, createEvent, updateEvent, deleteEvent, syncEventToGoogle,
+  listEvents, createEvent, updateEvent, deleteEvent,
   monthGridDays, isSameDay, fmtMonth, fmtTime, isoFromDateTime,
   EVENT_COLORS, EVENT_TITLE_PRESETS, type CalEvent,
 } from '@/api/calendar';
-import { getMyConnection, connectMock, disconnect as disconnectGoogle, type GoogleConnection } from '@/api/google';
+import {
+  isGoogleConnected, linkGoogleCalendar, unlinkGoogle,
+  pushEventToGoogleCalendar, deleteEventFromGoogleCalendar,
+} from '@/api/google';
 import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
-import { notifyComingSoon, notifyError, notifySuccess } from '@/lib/notify';
+import { notifyError, notifySuccess } from '@/lib/notify';
+import { confirm } from '@/components/ConfirmDialog';
 import { listBoards } from '@/api/boards';
 
-// Compatibility shape — mirrors the old GoogleState exposed by lib/calendar.
 interface GoogleState {
   connected: boolean;
-  email?: string;
-  connectedAt?: string;
-}
-function toGoogleState(c: GoogleConnection | null): GoogleState {
-  if (!c) return { connected: false };
-  return { connected: c.calendar_connected, email: c.email, connectedAt: c.connected_at };
+  email?: string | null;
 }
 
 type ViewMode = 'month' | 'agenda';
@@ -42,10 +40,10 @@ export default function CalendarPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [evs, conn] = await Promise.all([listEvents(), getMyConnection()]);
+      const [evs, conn] = await Promise.all([listEvents(), isGoogleConnected()]);
       setEvents(evs);
-      setGoogle(toGoogleState(conn));
-    } catch (e) { console.error('calendar refresh failed', e); }
+      setGoogle({ connected: conn.connected, email: conn.email });
+    } catch (e) { notifyError('Could not load calendar', e); }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -55,6 +53,18 @@ export default function CalendarPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'calendar_events' }, () => void refresh())
       .subscribe();
     return () => { void supabase.removeChannel(ch); };
+  }, [refresh]);
+
+  // When Supabase finishes the Google OAuth handshake, the session is updated.
+  // Re-pull the connection status so the "Connected · …" badge appears
+  // without the user having to refresh.
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'USER_UPDATED' || event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        void refresh();
+      }
+    });
+    return () => { sub.subscription.unsubscribe(); };
   }, [refresh]);
 
   const days = useMemo(() => monthGridDays(cursor), [cursor]);
@@ -97,13 +107,37 @@ export default function CalendarPage() {
           </div>
           <div className="flex items-center gap-2">
             {google.connected ? (
-              <button onClick={() => notifyComingSoon('Google Calendar sync')}
+              <button
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: 'Disconnect Google Calendar?',
+                    description: `Your CRM events stay where they are; we just stop pushing them to ${google.email ?? 'Google'}.`,
+                    confirmLabel: 'Disconnect',
+                  });
+                  if (!ok) return;
+                  try {
+                    await unlinkGoogle();
+                    notifySuccess('Google Calendar disconnected');
+                    await refresh();
+                  } catch (e) {
+                    notifyError('Could not disconnect', e);
+                  }
+                }}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors hover:bg-gray-50"
                 style={{ borderColor: '#D1F2EF', color: '#0F766E', background: '#F0FBFA' }}>
                 <GoogleDot /> Connected · {google.email}
               </button>
             ) : (
-              <button onClick={() => notifyComingSoon('Google Calendar sync')}
+              <button
+                onClick={async () => {
+                  try {
+                    await linkGoogleCalendar();
+                    // linkGoogleCalendar redirects the browser; lines below
+                    // only run if the SDK errors before navigation.
+                  } catch (e) {
+                    notifyError('Could not start Google sign-in', e);
+                  }
+                }}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors hover:border-[#1EC9C4] hover:text-[#1EC9C4]"
                 style={{ borderColor: '#E5E7EB', color: '#374151', background: 'white' }}>
                 <GoogleDot /> Connect Google Calendar
@@ -384,6 +418,7 @@ function EventModal({
     if (new Date(endIso) <= new Date(startIso)) { setError('End must be after start.'); return; }
     setBusy(true);
     try {
+      let savedId: string | null = existing?.id ?? null;
       if (existing) {
         await updateEvent(existing.id, {
           title: title.trim(), start: startIso, end: endIso,
@@ -397,7 +432,7 @@ function EventModal({
         });
         notifySuccess('Event updated');
       } else {
-        await createEvent({
+        const created = await createEvent({
           title: title.trim(), start: startIso, end: endIso,
           location: location.trim() || null,
           notes: notes.trim() || null,
@@ -407,11 +442,37 @@ function EventModal({
           color,
           allDay: false,
         });
+        savedId = created.id;
         notifySuccess('Event created');
       }
-      if (syncGoogle && googleConnected) {
-        notifyComingSoon('Google Calendar sync');
+
+      // Real Google Calendar sync — fires only when the toggle is on AND
+      // the user has linked Google. We push then stamp the returned event
+      // id back onto the row so a future "Delete" can also remove the
+      // Google side.
+      if (syncGoogle && googleConnected && savedId) {
+        try {
+          const { id: gcalId } = await pushEventToGoogleCalendar({
+            summary: title.trim(),
+            description: notes.trim() || undefined,
+            location: location.trim() || undefined,
+            start: startIso,
+            end:   endIso,
+            allDay: false,
+            attendees,
+          });
+          await updateEvent(savedId, {
+            googleEventId: gcalId,
+            syncedAt: new Date().toISOString(),
+          });
+          notifySuccess('Synced to Google Calendar');
+        } catch (gcalErr) {
+          // Don't fail the local save — surface a separate toast so the
+          // user knows the local event saved but the Google push didn't.
+          notifyError('Saved locally, but Google sync failed', gcalErr);
+        }
       }
+
       onSaved();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Save failed';
@@ -559,6 +620,12 @@ function EventModal({
                 <button onClick={() => setConfirmDelete(false)} className="text-xs px-3 py-1 rounded-lg border" style={{ borderColor: '#E5E7EB', color: '#6B7280' }}>Cancel</button>
                 <button onClick={async () => {
                   try {
+                    // Best-effort remove from Google first; even if Google
+                    // 404s we still want the local delete to proceed.
+                    if (existing.googleEventId) {
+                      try { await deleteEventFromGoogleCalendar(existing.googleEventId); }
+                      catch (gErr) { notifyError('Could not remove from Google Calendar', gErr); }
+                    }
                     await deleteEvent(existing.id);
                     notifySuccess('Event deleted');
                   } catch (e) {
