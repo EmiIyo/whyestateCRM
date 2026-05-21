@@ -1,7 +1,10 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { signOut as authSignOut, getCurrentUser, setNickname, getAvatarColor, getAvatarImage, getUserTier } from '@/lib/auth';
-import { getUserRole, ROLES, type Role } from '@/lib/permissions';
+import { signOut as authSignOut, setNickname, useAuthStore, DEFAULT_AVATAR_COLOR } from '@/lib/auth';
+import { ROLES, type Role } from '@/lib/permissions';
+import type { Enums } from '@/types/database';
+
+type UserTier = Enums<'user_tier'>;
 import {
   LayoutDashboard,
   Target,
@@ -41,47 +44,27 @@ const navItems: NavDef[] = [
 // Routes restricted by role. Items not listed here are visible to everyone.
 const NAV_ROLE_GATES: Partial<Record<string, Role[]>> = {};
 
-// Admin Control is restricted to the master-admin account.
-const MASTER_ADMIN_EMAIL = 'linux@whyestate.com';
-
 const secondaryNavItems: NavDef[] = [
   { label: 'Admin Control', icon: Shield,   path: ROUTE_PATHS.ADMIN,    badge: null },
   { label: 'Settings',      icon: Settings, path: ROUTE_PATHS.SETTINGS, badge: null },
 ];
 
-function isMasterAdmin(email: string | undefined): boolean {
-  return (email ?? '').toLowerCase() === MASTER_ADMIN_EMAIL;
-}
-
-// Resolve the actual role for a given email — master-admin email overrides
-// whatever is stored, otherwise read from the per-user role assignment.
-function resolveRole(email: string | undefined): Role {
-  if (isMasterAdmin(email)) return 'master_admin';
-  return email ? getUserRole(email) : 'viewer';
-}
-
-function roleLabel(role: Role): string {
-  return ROLES.find((r) => r.id === role)?.label ?? 'Member';
+function tierTone(tier: UserTier | undefined): { bg: string; text: string } {
+  switch (tier) {
+    case 'Staff':          return { bg: '#F3F4F6', text: '#374151' };
+    case 'Branch Manager': return { bg: '#FEF3C7', text: '#92400E' };
+    case 'Branch Partner': return { bg: '#EDE9FE', text: '#7C3AED' };
+    case 'Agent':
+    default:               return { bg: '#E0F2FE', text: '#0369A1' };
+  }
 }
 
 function roleTone(role: Role): { bg: string; text: string } {
   return ROLES.find((r) => r.id === role)?.tone ?? { bg: '#F3F4F6', text: '#374151' };
 }
 
-// Tier label = the job tier set in Admin Control → User Setting.
-// Falls back to the role label only if no email yet.
-function tierLabel(email: string | undefined): string {
-  if (!email) return roleLabel('viewer');
-  return getUserTier(email);
-}
-function tierTone(email: string | undefined): { bg: string; text: string } {
-  const t = email ? getUserTier(email) : 'Agent';
-  switch (t) {
-    case 'Agent':          return { bg: '#E0F2FE', text: '#0369A1' };
-    case 'Staff':          return { bg: '#F3F4F6', text: '#374151' };
-    case 'Branch Manager': return { bg: '#FEF3C7', text: '#92400E' };
-    case 'Branch Partner': return { bg: '#EDE9FE', text: '#7C3AED' };
-  }
+function roleLabel(role: Role): string {
+  return ROLES.find((r) => r.id === role)?.label ?? 'Member';
 }
 
 // ─── Sidebar width states ─────────────────────────────────────────────────────
@@ -189,29 +172,34 @@ function NavItem({
 // ─── User Profile Card ────────────────────────────────────────────────────────
 function UserCard({ collapsed }: { collapsed: boolean }) {
   const navigate = useNavigate();
-  const user = getCurrentUser();
-  const userName = user?.name || 'LinuxLin';
-  const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase();
-  const USER_ROLE = tierLabel(user?.email);
+  // Subscribe to the auth store so name/tier/avatar changes re-render this
+  // card immediately — no more "press refresh to see the new tag".
+  const profile = useAuthStore((s) => s.profile);
+  const user    = useAuthStore((s) => s.user);
+  const userName     = profile?.display_name || user?.name || user?.email?.split('@')[0] || 'User';
+  const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || 'U';
+  const userTier     = profile?.tier ?? 'Agent';
+  const avatarColor  = profile?.avatar_color || DEFAULT_AVATAR_COLOR;
+  const avatarUrl    = profile?.avatar_url || null;
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(userName);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
 
-  const handleSignOut = () => {
-    authSignOut();
+  const handleSignOut = async () => {
+    await authSignOut();
     navigate(ROUTE_PATHS.HOME, { replace: true });
   };
 
   const startEdit = () => { setDraft(userName); setEditing(true); };
   const cancelEdit = () => { setDraft(userName); setEditing(false); };
-  const saveEdit = () => {
+  const saveEdit = async () => {
     const next = draft.trim();
     if (!next || next === userName) { cancelEdit(); return; }
-    setNickname(next);
-    // Reload so the Agent column on every prospect grid reflects the new name.
-    window.location.reload();
+    try { await setNickname(next); }
+    catch (e) { console.error('setNickname', e); }
+    setEditing(false);
   };
 
   if (collapsed) {
@@ -220,13 +208,15 @@ function UserCard({ collapsed }: { collapsed: boolean }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <div
-              className="w-9 h-9 rounded-full flex items-center justify-center mx-auto cursor-default"
-              style={{ background: '#1EC9C4' }}
+              className="w-9 h-9 rounded-full flex items-center justify-center mx-auto cursor-default overflow-hidden"
+              style={{ background: avatarColor }}
             >
-              <span className="text-xs font-bold text-white">{userInitials}</span>
+              {avatarUrl
+                ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
+                : <span className="text-xs font-bold text-white">{userInitials}</span>}
             </div>
           </TooltipTrigger>
-          <TooltipContent side="right">{userName} · {USER_ROLE}</TooltipContent>
+          <TooltipContent side="right">{userName} · {userTier}</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -246,10 +236,10 @@ function UserCard({ collapsed }: { collapsed: boolean }) {
       <div className="flex items-center gap-2.5 px-1 py-2 group">
         <div
           className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden"
-          style={{ background: getAvatarColor() }}
+          style={{ background: avatarColor }}
         >
-          {getAvatarImage()
-            ? <img src={getAvatarImage() as string} alt="" className="w-full h-full object-cover" />
+          {avatarUrl
+            ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
             : <span className="text-xs font-bold text-white">{userInitials}</span>}
         </div>
         <div className="min-w-0 flex-1">
@@ -278,7 +268,7 @@ function UserCard({ collapsed }: { collapsed: boolean }) {
               <Pencil size={11} className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" style={{ color: '#A1A9B6' }} />
             </button>
           )}
-          <p className="text-xs truncate" style={{ color: '#A1A9B6' }}>{USER_ROLE}</p>
+          <p className="text-xs truncate" style={{ color: '#A1A9B6' }}>{userTier}</p>
         </div>
         {editing && (
           <div className="flex items-center gap-0.5 flex-shrink-0">
@@ -314,18 +304,18 @@ function Sidebar({
   const collapsed = state === 'collapsed';
   const width = sidebarPx(state);
 
-  // Hide Admin Control unless the current user is the master admin.
-  const me = getCurrentUser();
-  const visibleSecondary = secondaryNavItems.filter((item) =>
-    item.path === ROUTE_PATHS.ADMIN ? isMasterAdmin(me?.email) : true
-  );
+  // Reactive: re-render when the user's role changes (master_admin gated).
+  const profile = useAuthStore((s) => s.profile);
+  const meRole: Role = profile?.role ?? 'viewer';
 
-  // Filter main nav items by role gates.
-  const meRole = resolveRole(me?.email);
-  const visibleNav = navItems.filter((item) => {
+  const visibleSecondary = useMemo(() => secondaryNavItems.filter((item) =>
+    item.path === ROUTE_PATHS.ADMIN ? meRole === 'master_admin' : true
+  ), [meRole]);
+
+  const visibleNav = useMemo(() => navItems.filter((item) => {
     const gate = NAV_ROLE_GATES[item.path];
     return !gate || gate.includes(meRole);
-  });
+  }), [meRole]);
 
   return (
     <>
@@ -418,12 +408,20 @@ function TopBar({
   onShowSidebar: () => void;
 }) {
   const navigate = useNavigate();
-  const me = getCurrentUser();
-  const userName     = me?.name || 'User';
-  const userEmail    = me?.email || '';
-  const userRoleLbl   = tierLabel(userEmail);
-  const userRoleStyle = tierTone(userEmail);
+  // Subscribe to the store — every tier/avatar/name change re-renders the topbar.
+  const profile = useAuthStore((s) => s.profile);
+  const user    = useAuthStore((s) => s.user);
+  const userName     = profile?.display_name || user?.name || user?.email?.split('@')[0] || 'User';
+  const userEmail    = profile?.email || user?.email || '';
+  const userTier     = profile?.tier ?? 'Agent';
+  const userRole     = profile?.role ?? 'viewer';
+  const userRoleLbl   = userTier;
+  const userRoleStyle = tierTone(userTier);
   const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || 'U';
+  const avatarColor  = profile?.avatar_color || DEFAULT_AVATAR_COLOR;
+  const avatarUrl    = profile?.avatar_url || null;
+  const isMaster     = userRole === 'master_admin';
+  void roleTone; void roleLabel; // kept for future role-badge use
 
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -434,8 +432,8 @@ function TopBar({
     return () => document.removeEventListener('mousedown', h);
   }, [menuOpen]);
 
-  const handleSignOut = () => {
-    authSignOut();
+  const handleSignOut = async () => {
+    await authSignOut();
     navigate(ROUTE_PATHS.HOME, { replace: true });
   };
 
@@ -479,9 +477,9 @@ function TopBar({
           className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl hover:bg-[#F5F7FA] transition-colors">
           <div
             className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden"
-            style={{ background: getAvatarColor() }}>
-            {getAvatarImage()
-              ? <img src={getAvatarImage() as string} alt="" className="w-full h-full object-cover" />
+            style={{ background: avatarColor }}>
+            {avatarUrl
+              ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
               : <span className="text-xs font-bold text-white">{userInitials}</span>}
           </div>
           <div className="hidden sm:block text-left">
@@ -503,7 +501,7 @@ function TopBar({
                 {userRoleLbl}
               </span>
             </div>
-            {isMasterAdmin(userEmail) && (
+            {isMaster && (
               <button onClick={() => { setMenuOpen(false); navigate(ROUTE_PATHS.ADMIN); }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-gray-50 transition-colors text-left"
                 style={{ color: '#374151' }}>
