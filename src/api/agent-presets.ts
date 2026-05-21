@@ -26,7 +26,7 @@ export async function listAgentPresets(): Promise<AgentPreset[]> {
   return (data ?? []).map(fromDb);
 }
 
-export async function createAgentPreset(input: { name: string; color: string }): Promise<AgentPreset> {
+export async function createAgentPreset(input: { name: string; color: string; id?: string }): Promise<AgentPreset> {
   const { data: { user } } = await supabase.auth.getUser();
   const { data: maxRow } = await supabase
     .from('agent_presets').select('position').order('position', { ascending: false }).limit(1).maybeSingle();
@@ -34,6 +34,7 @@ export async function createAgentPreset(input: { name: string; color: string }):
   const { data, error } = await supabase
     .from('agent_presets')
     .insert({
+      id: input.id,
       name: input.name.trim(),
       color: input.color,
       position: nextPosition,

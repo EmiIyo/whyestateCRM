@@ -152,7 +152,10 @@ function ProfileTab({ navigate, signOut, email, name }: {
       if (avatar !== getAvatarColor()) await setAvatarColor(avatar);
       if (pendingFile) await setAvatarImage(pendingFile);
       else if (avatarImg === null && getAvatarImage() !== null) await clearAvatarImage();
-      window.location.reload();
+      // Optimistic update already wrote through to the auth store —
+      // exit edit mode and trust realtime/store subscribers to repaint.
+      setPendingFile(null);
+      setEditing(false);
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : 'Save failed');
     }
@@ -369,9 +372,11 @@ function ProfileTab({ navigate, signOut, email, name }: {
 }
 
 // ─── Security tab ───────────────────────────────────────────────────────────
+// Supabase Auth's updateUser() rotates the password using the current session
+// token — there is no separate "current password" check available client-side.
+// Surfacing a current-password field would imply a verification that doesn't
+// actually happen, so we drop it.
 function SecurityTab({ email: _email }: { email: string }) {
-  const accountHasPassword = true; // Supabase Auth accounts always have one.
-  const [current,   setCurrent]   = useState('');
   const [next,      setNext]      = useState('');
   const [confirm,   setConfirm]   = useState('');
   const [busy,      setBusy]      = useState(false);
@@ -386,11 +391,9 @@ function SecurityTab({ email: _email }: { email: string }) {
 
     setBusy(true);
     try {
-      // Supabase Auth requires an active session — the current password isn't
-      // re-verified here; instead Supabase rotates the session on success.
       await setPassword(next);
       setSuccess(true);
-      setCurrent(''); setNext(''); setConfirm('');
+      setNext(''); setConfirm('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not update password.');
     } finally {
@@ -399,7 +402,7 @@ function SecurityTab({ email: _email }: { email: string }) {
   };
 
   const cancel = () => {
-    setCurrent(''); setNext(''); setConfirm(''); setError(null); setSuccess(false);
+    setNext(''); setConfirm(''); setError(null); setSuccess(false);
   };
 
   return (
@@ -409,26 +412,14 @@ function SecurityTab({ email: _email }: { email: string }) {
           <KeyRound size={15} style={{ color: '#0F766E' }} />
         </div>
         <div>
-          <h3 className="text-sm font-bold" style={{ color: '#1A202C' }}>
-            {accountHasPassword ? 'Change password' : 'Set a password'}
-          </h3>
+          <h3 className="text-sm font-bold" style={{ color: '#1A202C' }}>Change password</h3>
           <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
-            {accountHasPassword
-              ? 'You\'ll be asked for the new password next time you sign in.'
-              : 'No password set yet — pick one to secure your account.'}
+            You'll be asked for the new password next time you sign in. If you forgot your current one, sign out and use "Forgot password?" instead.
           </p>
         </div>
       </div>
 
       <div className="space-y-5">
-        {accountHasPassword && (
-          <PasswordField
-            label="Current Password"
-            value={current}
-            onChange={setCurrent}
-            placeholder="Enter current password"
-          />
-        )}
         <PasswordField
           label="New Password"
           value={next}
@@ -460,7 +451,7 @@ function SecurityTab({ email: _email }: { email: string }) {
           style={{ borderColor: '#E5E7EB', color: '#6B7280' }}>
           Cancel
         </button>
-        <button onClick={submit} disabled={busy || !next || !confirm || (accountHasPassword && !current)}
+        <button onClick={submit} disabled={busy || !next || !confirm}
           className="px-6 py-1.5 rounded-lg text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
           style={{ background: '#9C1F2D' }}>
           {busy ? 'Saving…' : 'Submit'}

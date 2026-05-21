@@ -782,19 +782,18 @@ interface PickerBoard {
   location: string;
   color: string;
 }
-function loadBoardsForPicker(): PickerBoard[] {
-  try {
-    const raw = localStorage.getItem('we.crm.state');
-    if (!raw) return [];
-    const s = JSON.parse(raw) as { boards?: PickerBoard[] };
-    return Array.isArray(s.boards) ? s.boards : [];
-  } catch { return []; }
-}
-
 function LocationPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [open, setOpen] = useState(false);
+  const [boards, setBoards] = useState<PickerBoard[]>([]);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const boards = useMemo(() => loadBoardsForPicker(), []);
+
+  useEffect(() => {
+    let alive = true;
+    void import('@/api/boards').then(({ listBoards }) => listBoards())
+      .then((rows) => { if (alive) setBoards(rows.map((b) => ({ id: b.id, name: b.name, location: b.location, color: b.color }))); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     if (!open) return;

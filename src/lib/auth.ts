@@ -188,17 +188,28 @@ export async function setAvatarImage(file: File): Promise<void> {
   const s = useAuthStore.getState();
   if (!s.user) throw new Error('Not authenticated');
   const ext = (file.name.split('.').pop() ?? 'png').toLowerCase();
-  const path = `${s.user.id}/avatar.${ext}`;
+  // Unique path per upload so every overwrite gets a fresh URL — no
+  // cache-busting query string needed, and CDN/browser caches behave naturally.
+  const path = `${s.user.id}/avatar-${Date.now()}.${ext}`;
+
+  // Best-effort cleanup of previous avatar blobs in this user's folder so
+  // storage doesn't grow unbounded. Failures are non-fatal.
+  try {
+    const { data: previous } = await supabase.storage.from('avatars').list(s.user.id, { limit: 50 });
+    if (previous && previous.length > 0) {
+      await supabase.storage.from('avatars').remove(previous.map((f) => `${s.user!.id}/${f.name}`));
+    }
+  } catch { /* ignore */ }
 
   const { error: upErr } = await supabase.storage.from('avatars').upload(path, file, {
     cacheControl: '3600',
-    upsert: true,
+    upsert: false,
     contentType: file.type || `image/${ext}`,
   });
   if (upErr) throw upErr;
 
   const { data: pub } = supabase.storage.from('avatars').getPublicUrl(path);
-  const url = pub.publicUrl ? `${pub.publicUrl}?v=${Date.now()}` : null;
+  const url = pub.publicUrl ?? null;
 
   await updateMyProfile({ avatar_url: url });
   if (s.profile) s.setProfile({ ...s.profile, avatar_url: url });

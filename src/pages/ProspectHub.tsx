@@ -1341,6 +1341,15 @@ function ManageBoardModal({
   const [inviteEmail, setInviteEmail] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Resync when the board prop changes (realtime refreshHub updated the
+  // canonical board). Only overwrite fields the user hasn't already edited.
+  useEffect(() => {
+    setName((curr) => (curr === '' || curr === board.name ? board.name : curr));
+    setLocation((curr) => (curr === '' || curr === board.location ? board.location : curr));
+    setColor((curr) => (curr === board.color ? board.color : curr));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [board.id, board.name, board.location, board.color]);
+
   // Permission gates (driven by Admin Control → Prospect Hub Setting matrix)
   const myRole       = resolveAppRole(getCurrentUser()?.email);
   const canInvite    = canDo(myRole, 'boards.invite_members');
@@ -3490,6 +3499,11 @@ export default function ProspectHub() {
     };
   }, [profileById]);
 
+  // Suppress realtime-driven refreshes during big batch operations
+  // (loadDemoData inserts ~15k rows — without this the realtime listener
+  // would fire refreshHub() after every row and freeze the page).
+  const suppressRealtime = useRef(false);
+
   // ── Boot: hydrate everything from Supabase on first mount ────────────────
   const refreshHub = useCallback(async () => {
     try {
@@ -3545,38 +3559,50 @@ export default function ProspectHub() {
   useEffect(() => { void refreshHub(); }, [refreshHub]);
 
   // ── Realtime: any change anywhere triggers a full refetch (simple + safe). ─
+  // Channel name includes a random suffix so two tabs of the same user don't
+  // clobber each other's subscription.
   useEffect(() => {
+    // Debounce burst events (e.g. bulk inserts) so we refetch at most once per
+    // 500ms instead of once per row.
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRefresh = () => {
+      if (suppressRealtime.current) return;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => { void refreshHub(); }, 500);
+    };
+    const channelName = `prospect-hub-${Math.random().toString(36).slice(2, 8)}`;
     const ch = supabase
-      .channel('prospect-hub')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'boards' },         () => void refreshHub())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'prospects' },      () => void refreshHub())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'folders' },        () => void refreshHub())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'board_members' },  () => void refreshHub())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'folder_members' }, () => void refreshHub())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_presets' },  () => void refreshHub())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'recycle_bin' },    () => void refreshHub())
+      .channel(channelName)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'boards' },         scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'prospects' },      scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'folders' },        scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'board_members' },  scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'folder_members' }, scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_presets' },  scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recycle_bin' },    scheduleRefresh)
       .subscribe();
-    return () => { void supabase.removeChannel(ch); };
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      void supabase.removeChannel(ch);
+    };
   }, [refreshHub]);
 
   // ── Agent preset CRUD ─────────────────────────────────────────────────────
-  // The dropdown-style consumers expect a synchronous return, so this fires
-  // the Supabase insert in the background and returns an optimistic preset
-  // with a temporary id; realtime refreshes the canonical record shortly after.
+  // Generate a real UUID client-side and send it through to Supabase — the
+  // optimistic preset uses the SAME id that will land in the DB, so any
+  // downstream reference (e.g. an agent column dropdown) survives the
+  // realtime round-trip without orphans.
   const addAgentPreset = (name: string, color: string): AgentPreset => {
     const trimmed = name.trim();
     const existing = agentPresets.find((p) => p.name.toLowerCase() === trimmed.toLowerCase());
     if (existing) return existing;
-    const tempId = `agent_tmp_${Date.now()}`;
-    const optimistic: AgentPreset = { id: tempId, name: trimmed, color };
+    const id = crypto.randomUUID();
+    const optimistic: AgentPreset = { id, name: trimmed, color };
     setAgentPresets((prev) => [...prev, optimistic]);
-    void agentsApi.createAgentPreset({ name: trimmed, color })
-      .then((created) => {
-        setAgentPresets((prev) => prev.map((p) => p.id === tempId ? { id: created.id, name: created.name, color: created.color } : p));
-      })
+    void agentsApi.createAgentPreset({ id, name: trimmed, color })
       .catch((e) => {
         console.error('addAgentPreset', e);
-        setAgentPresets((prev) => prev.filter((p) => p.id !== tempId));
+        setAgentPresets((prev) => prev.filter((p) => p.id !== id));
       });
     return optimistic;
   };
@@ -3603,9 +3629,23 @@ export default function ProspectHub() {
   };
 
   // Invite — email gets resolved to a Supabase user_id via the profile
-  // directory. Unknown email = no-op (the user must sign up first).
+  // directory. Refetch the directory once before failing, since the invitee
+  // might have signed up in another tab since the last load.
+  const resolveInvite = async (email: string): Promise<{ id: string; name: string } | null> => {
+    const cleaned = email.trim().toLowerCase();
+    const hit = profileByEmail.get(cleaned);
+    if (hit) return hit;
+    // Stale directory? Refetch and try again before alerting.
+    const { refreshDirectory } = await import('@/lib/auth');
+    await refreshDirectory();
+    const dir = useAuthStore.getState().directory;
+    const fresh = dir.find((p) => p.email.toLowerCase() === cleaned);
+    if (!fresh) return null;
+    return { id: fresh.id, name: fresh.display_name || cleaned.split('@')[0] };
+  };
+
   const inviteBoardMember = async (boardId: string, email: string) => {
-    const target = profileByEmail.get(email.trim().toLowerCase());
+    const target = await resolveInvite(email);
     if (!target) { window.alert(`No user found with email ${email}. They must sign up first.`); return; }
     const member: BoardMember = { id: target.id, email, role: 'viewer' };
     setBoardMembers((prev) => ({ ...prev, [boardId]: [...(prev[boardId] ?? []), member] }));
@@ -3623,7 +3663,7 @@ export default function ProspectHub() {
   };
 
   const inviteFolderMember = async (folderId: string, email: string) => {
-    const target = profileByEmail.get(email.trim().toLowerCase());
+    const target = await resolveInvite(email);
     if (!target) { window.alert(`No user found with email ${email}. They must sign up first.`); return; }
     const member: BoardMember = { id: target.id, email, role: 'viewer' };
     setFolderMembers((prev) => ({ ...prev, [folderId]: [...(prev[folderId] ?? []), member] }));
@@ -3726,15 +3766,15 @@ export default function ProspectHub() {
   const loadDemoData = async () => {
     const ok = window.confirm('Load 50 demo project boards (300 prospects each)?\n\nThis adds ~15,000 prospect rows to your Supabase database. It may take 20–60 seconds.');
     if (!ok) return;
+    suppressRealtime.current = true;
+    setLoadingHub(true);
     try {
       const seed = generateDemoSeed(OWNER_EMAIL, OWNER_NAME, 50, 300);
-      // Create folders first so boards can reference them.
       const folderIdMap = new Map<string, string>();
       for (const f of seed.folders) {
         const created = await foldersApi.createFolder(f.name);
         folderIdMap.set(f.id, created.id);
       }
-      // Now create boards (one at a time so each gets a unique position).
       for (const b of seed.boards) {
         const newFolderId = b.folderId ? (folderIdMap.get(b.folderId) ?? null) : null;
         const created = await boardsApi.createBoard({
@@ -3745,11 +3785,12 @@ export default function ProspectHub() {
           await prospectsApi.importProspects(created.id, rowsForBoard, 'append');
         }
       }
-      await refreshHub();
     } catch (e) {
       console.error('loadDemoData', e);
       window.alert((e as Error).message);
-      void refreshHub();
+    } finally {
+      suppressRealtime.current = false;
+      await refreshHub();
     }
   };
 

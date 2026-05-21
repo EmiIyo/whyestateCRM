@@ -17,6 +17,7 @@ import {
 import { loadRolePerms, saveRolePerms as saveRolePermsApi } from '@/api/permissions';
 import { adminUpdateProfile, adminSetUserTier, deleteUser } from '@/api/profiles';
 import { createInvite, listInvites, revokeInvite, type Invite } from '@/api/invites';
+import { supabase } from '@/lib/supabase';
 
 type Section = 'main' | 'prospect-hub' | 'user-setting';
 
@@ -133,6 +134,20 @@ function UsersTable() {
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
 
+  // Live updates when any admin (including on another device) edits roles,
+  // tiers, names, or removes users. The auth store directory is the source of
+  // truth — refetch + bump tick to re-render derived rows.
+  useEffect(() => {
+    void refreshDirectory();
+    const ch = supabase.channel('admin-profiles')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, async () => {
+        await refreshDirectory();
+        setTick((t) => t + 1);
+      })
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, []);
+
   const users = useMemo(() => listKnownUsers(), [tick]);
   const filtered = users.filter((u) => {
     if (!q) return true;
@@ -168,10 +183,6 @@ function UsersTable() {
           await adminUpdateProfile(id, { display_name: trimmed });
           await refreshDirectory();
         }
-        if (u.email.toLowerCase() === myEmail) {
-          window.location.reload();
-          return;
-        }
         setTick((t) => t + 1);
       } catch (e) { console.error('rename user failed', e); }
     }
@@ -197,11 +208,11 @@ function UsersTable() {
             className="flex-1 text-xs outline-none bg-transparent placeholder:text-gray-300" />
         </div>
         <button
-          onClick={() => window.location.reload()}
-          title="Reload to make every avatar, name, tier, and permission across the app reflect the latest changes"
+          onClick={async () => { await refreshDirectory(); setTick((t) => t + 1); }}
+          title="Re-fetch the latest directory state from Supabase"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors"
           style={{ borderColor: '#E5E7EB', color: '#374151', background: 'white' }}>
-          <Save size={13} /> Save & Reload
+          <Save size={13} /> Refresh
         </button>
         <button
           onClick={() => setShowAddUser(true)}
@@ -722,8 +733,7 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
       </div>
 
       <p className="text-xs mt-3" style={{ color: '#9CA3AF' }}>
-        Changes save to <code style={{ background: '#F3F4F6', padding: '1px 4px', borderRadius: 4 }}>localStorage</code> on this browser.
-        Wiring buttons in Prospect Hub to actually respect these permissions comes in the next step.
+        Changes save to Supabase (<code style={{ background: '#F3F4F6', padding: '1px 4px', borderRadius: 4 }}>role_permissions</code>) and propagate live to every signed-in member.
       </p>
     </div>
   );

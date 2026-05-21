@@ -78,7 +78,41 @@ export async function saveRolePerms(perms: RolePerms): Promise<void> {
   usePermsStore.getState().setPerms(perms);
 }
 
+// Factory defaults for the editable roles. Mirrors the seed in
+// migration `permissions_and_invites`.
+const DEFAULTS = {
+  admin: [
+    'boards.create','boards.edit','boards.delete','boards.reorder','boards.invite_members','boards.remove_members',
+    'folders.create','folders.edit','folders.delete','folders.assign_boards','folders.view_combined','folders.invite_members','folders.remove_members',
+    'rows.create','rows.edit','rows.delete','rows.duplicate','rows.bulk_delete',
+    'columns.create','columns.edit','columns.delete',
+    'agents.manage',
+    'data.import','data.export','data.demo',
+    'view.filter','view.quick_tabs',
+    'recycle.access','recycle.restore','recycle.purge',
+  ],
+  editor: [
+    'folders.view_combined',
+    'rows.create','rows.edit','rows.duplicate',
+    'columns.create','columns.edit',
+    'agents.manage',
+    'data.import','data.export',
+    'view.filter','view.quick_tabs',
+    'recycle.access','recycle.restore',
+  ],
+  viewer: [
+    'folders.view_combined',
+    'data.export',
+    'view.filter','view.quick_tabs',
+  ],
+} as const;
+
 export async function resetRolePerms(): Promise<void> {
+  await Promise.all([
+    apiSaveRolePerms('admin',  [...DEFAULTS.admin]),
+    apiSaveRolePerms('editor', [...DEFAULTS.editor]),
+    apiSaveRolePerms('viewer', [...DEFAULTS.viewer]),
+  ]);
   await refreshPermissions();
 }
 
