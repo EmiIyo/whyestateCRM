@@ -72,7 +72,10 @@ interface GoogleEventPayload {
   attendees?: string[];
 }
 
-export async function pushEventToGoogleCalendar(event: GoogleEventPayload): Promise<{ id: string; htmlLink?: string }> {
+export async function pushEventToGoogleCalendar(
+  event: GoogleEventPayload,
+  opts?: { existingGoogleId?: string | null },
+): Promise<{ id: string; htmlLink?: string }> {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.provider_token;
   if (!token) {
@@ -92,8 +95,15 @@ export async function pushEventToGoogleCalendar(event: GoogleEventPayload): Prom
     attendees: event.attendees?.map((email) => ({ email })),
   };
 
-  const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
-    method: 'POST',
+  // Updating an already-synced event → PATCH the existing Google event so we
+  // don't end up with duplicates. Otherwise POST a fresh one.
+  const url = opts?.existingGoogleId
+    ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(opts.existingGoogleId)}`
+    : 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+  const method = opts?.existingGoogleId ? 'PATCH' : 'POST';
+
+  const res = await fetch(url, {
+    method,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
   });

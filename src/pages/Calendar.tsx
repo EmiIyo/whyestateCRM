@@ -452,24 +452,42 @@ function EventModal({
       // Google side.
       if (syncGoogle && googleConnected && savedId) {
         try {
-          const { id: gcalId } = await pushEventToGoogleCalendar({
-            summary: title.trim(),
-            description: notes.trim() || undefined,
-            location: location.trim() || undefined,
-            start: startIso,
-            end:   endIso,
-            allDay: false,
-            attendees,
-          });
+          const { id: gcalId } = await pushEventToGoogleCalendar(
+            {
+              summary: title.trim(),
+              description: notes.trim() || undefined,
+              location: location.trim() || undefined,
+              start: startIso,
+              end:   endIso,
+              allDay: false,
+              attendees,
+            },
+            // Existing Google ID → PATCH instead of POST, so updating a
+            // synced event doesn't create a duplicate on Google's side.
+            { existingGoogleId: existing?.googleEventId ?? null },
+          );
           await updateEvent(savedId, {
             googleEventId: gcalId,
             syncedAt: new Date().toISOString(),
           });
-          notifySuccess('Synced to Google Calendar');
+          notifySuccess(existing?.googleEventId ? 'Updated on Google Calendar' : 'Synced to Google Calendar');
         } catch (gcalErr) {
           // Don't fail the local save — surface a separate toast so the
           // user knows the local event saved but the Google push didn't.
           notifyError('Saved locally, but Google sync failed', gcalErr);
+        }
+      } else if (existing?.googleEventId && !syncGoogle && savedId) {
+        // User unticked "Sync to Google" on a previously-synced event —
+        // remove it from Google Calendar so the two sides stay consistent.
+        try {
+          await deleteEventFromGoogleCalendar(existing.googleEventId);
+          await updateEvent(savedId, {
+            googleEventId: null,
+            syncedAt: null,
+          });
+          notifySuccess('Removed from Google Calendar');
+        } catch (gcalErr) {
+          notifyError('Could not remove from Google Calendar', gcalErr);
         }
       }
 
