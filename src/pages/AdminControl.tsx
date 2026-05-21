@@ -341,7 +341,10 @@ function UsersTable() {
         <AddUserModal
           existingEmails={users.map((u) => u.email)}
           onClose={() => setShowAddUser(false)}
-          onCreated={() => { setShowAddUser(false); setTick((t) => t + 1); }}
+          // After issuing an invite, only nudge the parent to refresh — DON'T
+          // close the modal. The modal switches to the "show code" view so the
+          // admin can copy/share the code; closing is up to them.
+          onCreated={() => { setTick((t) => t + 1); }}
         />
       )}
       {pwdTarget && (

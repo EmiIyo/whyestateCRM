@@ -851,6 +851,10 @@ function BoardOverview({
 
   const handleDragStart = (i: number) => { dragIndex.current = i; dragBoardId.current = boards[i]?.id ?? null; };
   const handleDragEnter = (i: number) => {
+    // Guard with `boards.reorder` even though the toggle button is hidden when
+    // the permission is missing — if a viewer ends up in arrangeMode somehow
+    // (e.g. permission revoked mid-session), the drop is silently rejected.
+    if (!perms.boardsReorder) return;
     if (dragIndex.current === null || dragIndex.current === i) return;
     const next = [...boards];
     const [moved] = next.splice(dragIndex.current, 1);
@@ -887,7 +891,7 @@ function BoardOverview({
       onManage={() => onManageBoard(board)}
       arrangeMode={arrangeMode}
       showManageGear={perms.boardsManage}
-      dragHandlers={arrangeMode ? {
+      dragHandlers={arrangeMode && perms.boardsReorder ? {
         draggable: true,
         onDragStart: () => handleDragStart(indexInBoards),
         onDragEnter: () => handleDragEnter(indexInBoards),
@@ -1067,10 +1071,10 @@ function BoardOverview({
         return (
           <section key={folder.id} className="mb-5">
             <div
-              onDragOver={arrangeMode ? (e) => e.preventDefault() : undefined}
-              onDrop={arrangeMode ? () => handleDropOnFolder(folder.id) : undefined}
+              onDragOver={arrangeMode && perms.foldersAssignBoards ? (e) => e.preventDefault() : undefined}
+              onDrop={arrangeMode && perms.foldersAssignBoards ? () => handleDropOnFolder(folder.id) : undefined}
               className="flex items-center gap-2 mb-2.5 px-1 group"
-              style={arrangeMode ? { borderRadius: 12, padding: '4px 8px', border: '2px dashed #D1D5DB' } : undefined}
+              style={arrangeMode && perms.foldersAssignBoards ? { borderRadius: 12, padding: '4px 8px', border: '2px dashed #D1D5DB' } : undefined}
             >
               <button onClick={() => onToggleFolder(folder.id)} className="text-gray-400 hover:text-gray-600 transition-colors">
                 {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
@@ -1122,8 +1126,8 @@ function BoardOverview({
       {/* Ungrouped boards */}
       {ungrouped.length > 0 && (
         <section
-          onDragOver={arrangeMode ? (e) => e.preventDefault() : undefined}
-          onDrop={arrangeMode ? () => handleDropOnFolder(null) : undefined}
+          onDragOver={arrangeMode && perms.foldersAssignBoards ? (e) => e.preventDefault() : undefined}
+          onDrop={arrangeMode && perms.foldersAssignBoards ? () => handleDropOnFolder(null) : undefined}
         >
           {folders.length > 0 && (
             <h3 className="text-xs font-semibold uppercase tracking-wider mb-2.5 px-1" style={{ color: '#9CA3AF' }}>
@@ -1172,7 +1176,7 @@ import {
 // Invite roles mirror the global RBAC roles defined in @/lib/permissions, minus
 // master_admin (which can't be granted via an invitation).
 import type { Role as AppRole } from '@/lib/permissions';
-import { ROLES as APP_ROLES, setUserRole as setUserRoleGlobal, getUserRole, canDo, setViewAsRole, useViewAsStore } from '@/lib/permissions';
+import { ROLES as APP_ROLES, setUserRole as setUserRoleGlobal, getUserRole, canDo, setViewAsRole, useViewAsStore, usePermsStore } from '@/lib/permissions';
 
 // Resolution comes straight from the profiles directory in the auth store —
 // master_admin is determined server-side at signup-trigger time, so no email
@@ -1329,8 +1333,12 @@ function ManageBoardModal({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board.id, board.name, board.location, board.color]);
 
-  // Permission gates (driven by Admin Control → Prospect Hub Setting matrix)
+  // Permission gates (driven by Admin Control → Permission Matrix).
+  // Subscribing to BOTH stores ensures the modal re-renders the moment an
+  // admin saves a change OR the user toggles View As — otherwise stale
+  // permissions would stick around as long as the modal stays open.
   const viewAsOverride = useViewAsStore((s) => s.role);
+  usePermsStore((s) => s.perms);
   const myRole       = resolveAppRole(getCurrentUser()?.email, viewAsOverride);
   const canInvite    = canDo(myRole, 'boards.invite_members');
   const canRemoveMem = canDo(myRole, 'boards.remove_members');
@@ -3397,6 +3405,10 @@ export default function ProspectHub() {
   const OWNER_NAME  = me?.name  || 'LinuxLin';
   const OWNER_EMAIL = me?.email || 'unknown@whyestate.com';
   const viewAsOverride = useViewAsStore((s) => s.role);
+  // Subscribing here makes EVERY downstream `can(...)` call re-evaluate the
+  // moment an admin saves a matrix change — modals, buttons, drag/drop UI,
+  // recycle bin actions all stay in sync without page refresh.
+  usePermsStore((s) => s.perms);
   const myRole      = resolveAppRole(me?.email, viewAsOverride);
   const can         = (key: string) => canDo(myRole, key);
 
@@ -3574,6 +3586,7 @@ export default function ProspectHub() {
   // downstream reference (e.g. an agent column dropdown) survives the
   // realtime round-trip without orphans.
   const addAgentPreset = (name: string, color: string): AgentPreset => {
+    if (!can('agents.manage')) return { id: '', name, color };
     const trimmed = name.trim();
     const existing = agentPresets.find((p) => p.name.toLowerCase() === trimmed.toLowerCase());
     if (existing) return existing;
@@ -3588,6 +3601,7 @@ export default function ProspectHub() {
     return optimistic;
   };
   const removeAgentPreset = async (id: string) => {
+    if (!can('agents.manage')) return;
     setAgentPresets((prev) => prev.filter((p) => p.id !== id));
     try { await agentsApi.deleteAgentPreset(id); }
     catch (e) { notifyError('Could not remove agent', e); void refreshHub(); }
@@ -3603,6 +3617,7 @@ export default function ProspectHub() {
   }
 
   const updateBoard = async (id: string, patch: { name: string; location: string; color: string }) => {
+    if (!can('boards.edit')) return;
     setBoards((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
     if (activeBoard?.id === id) setActiveBoard((prev) => (prev ? { ...prev, ...patch } : prev));
     try { await boardsApi.updateBoard(id, patch); }
@@ -3626,6 +3641,7 @@ export default function ProspectHub() {
   };
 
   const inviteBoardMember = async (boardId: string, email: string) => {
+    if (!can('boards.invite_members')) return;
     const target = await resolveInvite(email);
     if (!target) { notifyError(`No user found with email ${email}`, 'Ask them to sign up first.'); return; }
     const member: BoardMember = { id: target.id, email, role: 'viewer' };
@@ -3635,6 +3651,7 @@ export default function ProspectHub() {
   };
 
   const removeBoardMember = async (boardId: string, memberId: string) => {
+    if (!can('boards.remove_members')) return;
     const list = boardMembers[boardId] ?? [];
     const target = list.find((m) => m.id === memberId);
     if (target && isMasterEmail(target.email)) return;
@@ -3644,6 +3661,7 @@ export default function ProspectHub() {
   };
 
   const inviteFolderMember = async (folderId: string, email: string) => {
+    if (!can('folders.invite_members')) return;
     const target = await resolveInvite(email);
     if (!target) { notifyError(`No user found with email ${email}`, 'Ask them to sign up first.'); return; }
     const member: BoardMember = { id: target.id, email, role: 'viewer' };
@@ -3653,6 +3671,7 @@ export default function ProspectHub() {
   };
 
   const removeFolderMember = async (folderId: string, memberId: string) => {
+    if (!can('folders.remove_members')) return;
     const list = folderMembers[folderId] ?? [];
     const target = list.find((m) => m.id === memberId);
     if (target && isMasterEmail(target.email)) return;
@@ -3679,6 +3698,7 @@ export default function ProspectHub() {
   };
 
   const createFolder = async (name: string) => {
+    if (!can('folders.create')) return;
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
@@ -3690,6 +3710,7 @@ export default function ProspectHub() {
   };
 
   const renameFolder = async (id: string, name: string) => {
+    if (!can('folders.edit')) return;
     const trimmed = name.trim();
     if (!trimmed) return;
     setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
@@ -3698,6 +3719,7 @@ export default function ProspectHub() {
   };
 
   const deleteFolder = async (id: string) => {
+    if (!can('folders.delete')) return;
     const folder = folders.find((f) => f.id === id);
     try {
       if (folder) {
@@ -3712,6 +3734,7 @@ export default function ProspectHub() {
   };
 
   const moveBoardToFolder = async (boardId: string, folderId: string | null) => {
+    if (!can('folders.assign_boards')) return;
     setBoards((prev) => prev.map((b) => (b.id === boardId ? { ...b, folderId } : b)));
     try { await boardsApi.updateBoard(boardId, { folderId }); }
     catch (e) { notifyError('Could not move board', e); void refreshHub(); }
@@ -3727,6 +3750,7 @@ export default function ProspectHub() {
 
   // ── Unload: drop all of MY boards (other users' data is preserved) ───────
   const unloadDemoData = async () => {
+    if (!can('data.demo')) return;
     const myBoards = boards.filter((b) => b.ownerEmail.toLowerCase() === myEmail);
     if (myBoards.length === 0) {
       notifyError('Nothing to unload', 'You have no boards yet.');
@@ -3755,6 +3779,7 @@ export default function ProspectHub() {
   // Each board does a single chunked insert via importProspects; the api layer
   // chunks 500 rows at a time so even the 300-row boards go in one request.
   const loadDemoData = async () => {
+    if (!can('data.demo')) return;
     const ok = await confirm({
       title: 'Load demo data?',
       description: '50 demo project boards with 300 prospects each will be written to your Supabase database (about 15,000 rows total). This takes 20–60 seconds.',
@@ -3791,6 +3816,7 @@ export default function ProspectHub() {
   const totalAll = Object.values(boardProspects).reduce((s, arr) => s + arr.length, 0);
 
   const deleteBoard = async (id: string) => {
+    if (!can('boards.delete')) return;
     const board = boards.find((b) => b.id === id);
     try {
       if (board) {
@@ -3807,6 +3833,7 @@ export default function ProspectHub() {
   };
 
   const createBoard = async (name: string, location: string, color: string) => {
+    if (!can('boards.create')) return;
     try {
       const created = await boardsApi.createBoard({ name, location, color });
       const newBoard = boardFromApi(created);
@@ -3914,9 +3941,11 @@ export default function ProspectHub() {
   const [customValues, setCustomValues] = useState<Record<string, Record<string, string>>>({});
 
   const renameColumn = (key: string, label: string) => {
+    if (!can('columns.edit')) return;
     setColumns((prev) => prev.map((c) => c.key === key ? { ...c, label } : c));
   };
   const deleteColumn = (key: string) => {
+    if (!can('columns.delete')) return;
     setColumns((prev) => prev.filter((c) => c.key !== key));
     setCustomValues((prev) => {
       const next: Record<string, Record<string, string>> = {};
@@ -3928,6 +3957,7 @@ export default function ProspectHub() {
     });
   };
   const addCustomField = (label: string, type: FieldType, options: string[]) => {
+    if (!can('columns.create')) return;
     const key = `custom_${Date.now()}`;
     const colType: ColType = type === 'dropdown' ? 'custom-select' : 'text';
     setColumns((prev) => [...prev, { key, label, width: 160, type: colType, fixed: false, placeholder: type === 'text' ? 'Add…' : undefined, options: type === 'dropdown' ? options : undefined }]);
@@ -4111,6 +4141,7 @@ export default function ProspectHub() {
   };
 
   const addRow = async () => {
+    if (!can('rows.create')) return;
     // Adding a row requires an active board to attach it to — folder-aggregate
     // view drops new rows into the first board in the folder.
     const targetBoardId =
@@ -4153,6 +4184,7 @@ export default function ProspectHub() {
   };
 
   const deleteRow = async (id: string) => {
+    if (!can('rows.delete')) return;
     await pushProspectsToBin([id]);
     setRows((p) => p.filter((r) => r.id !== id));
     setSelectedRows((p) => { const s = new Set(p); s.delete(id); return s; });
@@ -4161,6 +4193,7 @@ export default function ProspectHub() {
     catch (e) { notifyError('Could not delete prospect', e); void refreshHub(); }
   };
   const deleteSelected = async () => {
+    if (!can('rows.bulk_delete')) return;
     const ids = Array.from(selectedRows);
     await pushProspectsToBin(ids);
     setRows((p) => p.filter((r) => !selectedRows.has(r.id)));
@@ -4177,6 +4210,7 @@ export default function ProspectHub() {
   // Restore is best-effort: the DB has already cascaded the deletes, so we
   // recreate the snapshot in fresh rows and drop the bin entry.
   const restoreFromBin = async (id: string) => {
+    if (!can('recycle.restore')) return;
     const item = recycleBin.find((x) => x.id === id);
     if (!item) return;
     try {
@@ -4211,17 +4245,20 @@ export default function ProspectHub() {
     } catch (e) { notifyError('Could not restore item', e); void refreshHub(); }
   };
   const purgeFromBin = async (id: string) => {
+    if (!can('recycle.purge')) return;
     setRecycleBin((prev) => prev.filter((x) => x.id !== id));
     try { await recycleApi.purgeRecycleItem(id); }
     catch (e) { notifyError('Could not purge item', e); void refreshHub(); }
   };
   const emptyBin = async () => {
+    if (!can('recycle.purge')) return;
     setRecycleBin([]);
     try { await recycleApi.purgeAllRecycleItems(); }
     catch (e) { notifyError('Could not empty recycle bin', e); void refreshHub(); }
   };
 
   const duplicateRow = async (id: string) => {
+    if (!can('rows.duplicate')) return;
     const src = rows.find((r) => r.id === id);
     if (!src) return;
     try {
@@ -4507,6 +4544,7 @@ export default function ProspectHub() {
   // imports into the first board in the folder. Default-rows view (no board
   // open) gets a friendly error.
   const handleImport = async (imported: Prospect[], mode: ImportMode) => {
+    if (!can('data.import')) return;
     const targetBoardId =
       activeBoard?.id
       ?? (folderView && folderViewBoardIds.length ? folderViewBoardIds[0] : null);
@@ -4581,12 +4619,15 @@ export default function ProspectHub() {
             </div>
           )}
 
-          {/* Search */}
-          <div className="flex items-center gap-2 border border-gray-200 rounded-full px-3 py-1.5 bg-white flex-1 max-w-xs focus-within:border-[#1EC9C4] transition-colors">
-            <Search size={13} style={{ color: '#A1A9B6' }} />
-            <input className="flex-1 text-xs outline-none bg-transparent placeholder:text-gray-300" placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} />
-            {search && <button onClick={() => setSearch('')}><X size={11} className="text-gray-300 hover:text-gray-500" /></button>}
-          </div>
+          {/* Search — gated by view.filter (the catalog covers both
+              "filters and search" under one key on purpose). */}
+          {can('view.filter') && (
+            <div className="flex items-center gap-2 border border-gray-200 rounded-full px-3 py-1.5 bg-white flex-1 max-w-xs focus-within:border-[#1EC9C4] transition-colors">
+              <Search size={13} style={{ color: '#A1A9B6' }} />
+              <input className="flex-1 text-xs outline-none bg-transparent placeholder:text-gray-300" placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} />
+              {search && <button onClick={() => setSearch('')}><X size={11} className="text-gray-300 hover:text-gray-500" /></button>}
+            </div>
+          )}
 
           <div className="flex-1" />
 
@@ -4907,8 +4948,10 @@ export default function ProspectHub() {
                           </div>
                         )}
 
-                        {/* Fill handle dot — bottom-right corner of active cell */}
-                        {isActive && (col.type === 'text') && (
+                        {/* Fill handle dot — bottom-right corner of active cell.
+                            Hidden entirely when the role lacks rows.edit, so
+                            read-only viewers don't see a misleading affordance. */}
+                        {isActive && (col.type === 'text') && can('rows.edit') && (
                           <div
                             onMouseDown={(e) => onFillHandleMouseDown(e, row.id, col.key)}
                             style={{
