@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, MutableRefObject } from 'react';
+import { useState, useRef, useEffect, useMemo, MutableRefObject, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx-js-style';
 import {
@@ -8,8 +8,19 @@ import {
   FileText, FileSpreadsheet, Eye,
 } from 'lucide-react';
 import * as SliderPrimitive from '@radix-ui/react-slider';
-import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage, getUserTier } from '@/lib/auth';
+import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage, getUserTier, useAuthStore } from '@/lib/auth';
 import { importFromProspect, listClients, type Client } from '@/api/clients';
+import { supabase } from '@/lib/supabase';
+
+// Supabase API modules — every CRM mutation goes through here so changes
+// persist across devices and the rest of the team picks them up via realtime.
+import * as boardsApi    from '@/api/boards';
+import * as prospectsApi from '@/api/prospects';
+import * as foldersApi   from '@/api/folders';
+import * as membersApi   from '@/api/members';
+import * as agentsApi    from '@/api/agent-presets';
+import * as recycleApi   from '@/api/recycle-bin';
+import type { Json } from '@/types/database';
 
 // Tier display tones — mirror Admin Control's TIER_TONES so badges match
 // across User Setting, sidebar, topbar, and member lists.
@@ -3399,50 +3410,21 @@ export default function ProspectHub() {
   const myRole      = resolveAppRole(me?.email);
   const can         = (key: string) => canDo(myRole, key);
 
-  // ── Hydrate full CRM state from localStorage (shared across users) ───────
-  const initialState = (() => {
-    const loaded = loadCrmState();
-    if (loaded && loaded.boards.length > 0) {
-      // Backfill owner & folder fields for any legacy boards that pre-date them.
-      const boards = loaded.boards.map((b) => ({
-        ...b,
-        ownerEmail: b.ownerEmail || OWNER_EMAIL,
-        ownerName:  b.ownerName  || (b.ownerEmail ? b.ownerEmail.split('@')[0] : OWNER_NAME),
-        folderId:   b.folderId === undefined ? null : b.folderId,
-      }));
-      const folders = (loaded.folders ?? []).map((f) => ({
-        ...f,
-        ownerName: f.ownerName ?? (f.ownerEmail ? f.ownerEmail.split('@')[0] : ''),
-      }));
-      return { boards, prospects: loaded.prospects ?? {}, members: loaded.members ?? {}, folders, folderMembers: loaded.folderMembers ?? {}, agents: loaded.agents ?? [], recycleBin: loaded.recycleBin ?? [] };
-    }
-    // First-time-ever bootstrap on this browser → seed demo data owned by current user.
-    const seedBoards: Board[] = SEED_BOARDS_TEMPLATE.map((b) => ({ ...b, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME, folderId: null }));
-    const seedByBoard: Record<string, Prospect[]> = {
-      board_1: seedProspects.slice(0, 5),
-      board_2: seedProspects.slice(5, 9),
-      board_3: seedProspects.slice(9, 13),
-      board_4: seedProspects.slice(13, 15),
-      board_5: seedProspects.slice(15, 17),
-      board_6: seedProspects.slice(17),
-    };
-    return { boards: seedBoards, prospects: seedByBoard, members: {} as Record<string, BoardMember[]>, folders: [] as Folder[], folderMembers: {} as Record<string, BoardMember[]>, agents: [] as AgentPreset[], recycleBin: [] as RecycledItem[] };
-  })();
-
-  // ── Board state ───────────────────────────────────────────────────────────
-  const [boards, setBoards] = useState<Board[]>(initialState.boards);
+  // ── Board state (hydrated from Supabase on mount) ────────────────────────
+  const [boards, setBoards] = useState<Board[]>([]);
   const [view, setView]     = useState<'board' | 'grid'>('board');
   const [activeBoard, setActiveBoard] = useState<Board | null>(null);
   const [showNewBoard, setShowNewBoard]         = useState(false);
   const [arrangeMode, setArrangeMode]           = useState(false);
   const [manageBoardId, setManageBoardId]       = useState<string | null>(null);
   const [manageFolderId, setManageFolderId]     = useState<string | null>(null);
-  const [boardMembers, setBoardMembers]         = useState<Record<string, BoardMember[]>>(initialState.members);
-  const [boardProspects, setBoardProspects]     = useState<Record<string, Prospect[]>>(initialState.prospects);
-  const [folders, setFolders]                   = useState<Folder[]>(initialState.folders);
-  const [folderMembers, setFolderMembers]       = useState<Record<string, BoardMember[]>>(initialState.folderMembers);
-  const [agentPresets, setAgentPresets]         = useState<AgentPreset[]>(initialState.agents);
-  const [recycleBin, setRecycleBin]             = useState<RecycledItem[]>(initialState.recycleBin);
+  const [boardMembers, setBoardMembers]         = useState<Record<string, BoardMember[]>>({});
+  const [boardProspects, setBoardProspects]     = useState<Record<string, Prospect[]>>({});
+  const [folders, setFolders]                   = useState<Folder[]>([]);
+  const [folderMembers, setFolderMembers]       = useState<Record<string, BoardMember[]>>({});
+  const [agentPresets, setAgentPresets]         = useState<AgentPreset[]>([]);
+  const [recycleBin, setRecycleBin]             = useState<RecycledItem[]>([]);
+  const [loadingHub, setLoadingHub]             = useState(true);
   const [showRecycleBin, setShowRecycleBin]     = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   // Folder-aggregate view supports either a single folder or a combined set of folders.
@@ -3467,22 +3449,141 @@ export default function ProspectHub() {
   const visibleBoards = boards.filter(isVisible);
   const visibleFolders = folders.filter(isFolderVisible);
 
-  // ── Persist any change back to shared localStorage ────────────────────────
+  // ── Profile lookup helpers (Supabase user_id ↔ email/name) ───────────────
+  const directory = useAuthStore((s) => s.directory);
+  const profileById = useMemo(() => {
+    const m = new Map<string, { email: string; name: string }>();
+    for (const p of directory) m.set(p.id, { email: p.email, name: p.display_name || p.email.split('@')[0] });
+    return m;
+  }, [directory]);
+  const profileByEmail = useMemo(() => {
+    const m = new Map<string, { id: string; name: string }>();
+    for (const p of directory) m.set(p.email.toLowerCase(), { id: p.id, name: p.display_name || p.email.split('@')[0] });
+    return m;
+  }, [directory]);
+
+  const boardFromApi = useCallback((r: boardsApi.Board): Board => {
+    const owner = profileById.get(r.ownerId);
+    return {
+      id: r.id, name: r.name, location: r.location, color: r.color,
+      ownerEmail: owner?.email ?? '',
+      ownerName:  owner?.name  ?? (owner?.email?.split('@')[0] ?? ''),
+      folderId:   r.folderId,
+    };
+  }, [profileById]);
+
+  const folderFromApi = useCallback((r: foldersApi.Folder): Folder => {
+    const owner = profileById.get(r.ownerId);
+    return {
+      id: r.id, name: r.name,
+      ownerEmail: owner?.email ?? '',
+      ownerName:  owner?.name  ?? (owner?.email?.split('@')[0] ?? ''),
+    };
+  }, [profileById]);
+
+  const memberFromApi = useCallback((m: membersApi.BoardMember | membersApi.FolderMember): BoardMember => {
+    const p = profileById.get(m.userId);
+    return {
+      id: m.userId, // Use the user_id as the local member identifier — unique.
+      email: p?.email ?? '',
+      role: m.role as BoardMember['role'],
+    };
+  }, [profileById]);
+
+  // ── Boot: hydrate everything from Supabase on first mount ────────────────
+  const refreshHub = useCallback(async () => {
+    try {
+      const [b, p, f, bm, fm, ag, rb] = await Promise.all([
+        boardsApi.listBoards(),
+        prospectsApi.listAllProspects(),
+        foldersApi.listFolders(),
+        membersApi.listAllBoardMembers(),
+        membersApi.listAllFolderMembers(),
+        agentsApi.listAgentPresets(),
+        recycleApi.listRecycleBin(),
+      ]);
+
+      setBoards(b.map(boardFromApi));
+      setBoardProspects(p);
+      setFolders(f.map(folderFromApi));
+
+      const bmGrouped: Record<string, BoardMember[]> = {};
+      for (const m of bm) {
+        (bmGrouped[m.boardId] ??= []).push(memberFromApi(m));
+      }
+      setBoardMembers(bmGrouped);
+
+      const fmGrouped: Record<string, BoardMember[]> = {};
+      for (const m of fm) {
+        (fmGrouped[m.folderId] ??= []).push(memberFromApi(m));
+      }
+      setFolderMembers(fmGrouped);
+
+      setAgentPresets(ag.map((a) => ({ id: a.id, name: a.name, color: a.color })));
+      // Map each recycle row into the matching discriminated-union variant.
+      const mappedRecycle: RecycledItem[] = rb.map((r): RecycledItem => {
+        const deletedBy = profileById.get(r.deletedBy ?? '')?.email ?? '';
+        if (r.kind === 'board') {
+          return { kind: 'board', id: r.id, deletedAt: r.deletedAt, deletedBy,
+            payload: r.payload as { board: unknown; prospects: unknown; members: unknown } };
+        }
+        if (r.kind === 'folder') {
+          return { kind: 'folder', id: r.id, deletedAt: r.deletedAt, deletedBy,
+            payload: r.payload as { folder: unknown; members: unknown } };
+        }
+        return { kind: 'prospect', id: r.id, deletedAt: r.deletedAt, deletedBy,
+          payload: r.payload as { boardId: string; prospect: unknown; customValues: unknown } };
+      });
+      setRecycleBin(mappedRecycle);
+    } catch (e) {
+      console.error('[ProspectHub] refresh failed', e);
+    } finally {
+      setLoadingHub(false);
+    }
+  }, [boardFromApi, folderFromApi, memberFromApi, profileById]);
+
+  useEffect(() => { void refreshHub(); }, [refreshHub]);
+
+  // ── Realtime: any change anywhere triggers a full refetch (simple + safe). ─
   useEffect(() => {
-    saveCrmState({ boards, prospects: boardProspects, members: boardMembers, folders, folderMembers, agents: agentPresets, recycleBin });
-  }, [boards, boardProspects, boardMembers, folders, folderMembers, agentPresets, recycleBin]);
+    const ch = supabase
+      .channel('prospect-hub')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'boards' },         () => void refreshHub())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'prospects' },      () => void refreshHub())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'folders' },        () => void refreshHub())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'board_members' },  () => void refreshHub())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'folder_members' }, () => void refreshHub())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_presets' },  () => void refreshHub())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recycle_bin' },    () => void refreshHub())
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [refreshHub]);
 
   // ── Agent preset CRUD ─────────────────────────────────────────────────────
+  // The dropdown-style consumers expect a synchronous return, so this fires
+  // the Supabase insert in the background and returns an optimistic preset
+  // with a temporary id; realtime refreshes the canonical record shortly after.
   const addAgentPreset = (name: string, color: string): AgentPreset => {
     const trimmed = name.trim();
     const existing = agentPresets.find((p) => p.name.toLowerCase() === trimmed.toLowerCase());
     if (existing) return existing;
-    const preset: AgentPreset = { id: `agent_${Date.now()}`, name: trimmed, color };
-    setAgentPresets((prev) => [...prev, preset]);
-    return preset;
+    const tempId = `agent_tmp_${Date.now()}`;
+    const optimistic: AgentPreset = { id: tempId, name: trimmed, color };
+    setAgentPresets((prev) => [...prev, optimistic]);
+    void agentsApi.createAgentPreset({ name: trimmed, color })
+      .then((created) => {
+        setAgentPresets((prev) => prev.map((p) => p.id === tempId ? { id: created.id, name: created.name, color: created.color } : p));
+      })
+      .catch((e) => {
+        console.error('addAgentPreset', e);
+        setAgentPresets((prev) => prev.filter((p) => p.id !== tempId));
+      });
+    return optimistic;
   };
-  const removeAgentPreset = (id: string) => {
+  const removeAgentPreset = async (id: string) => {
     setAgentPresets((prev) => prev.filter((p) => p.id !== id));
+    try { await agentsApi.deleteAgentPreset(id); }
+    catch (e) { console.error('removeAgentPreset', e); void refreshHub(); }
   };
 
   const memberCounts: Record<string, number> = {};
@@ -3494,81 +3595,100 @@ export default function ProspectHub() {
     updatedPcts[b.id] = arr.length === 0 ? 0 : Math.round((updated / arr.length) * 100);
   }
 
-  const updateBoard = (id: string, patch: { name: string; location: string; color: string }) => {
+  const updateBoard = async (id: string, patch: { name: string; location: string; color: string }) => {
     setBoards((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
     if (activeBoard?.id === id) setActiveBoard((prev) => (prev ? { ...prev, ...patch } : prev));
+    try { await boardsApi.updateBoard(id, patch); }
+    catch (e) { console.error('updateBoard', e); void refreshHub(); }
   };
 
-  // Invite doesn't set a role — the member's effective permission comes from
-  // their entry in Admin Control → User Setting. The stored `role` is a
-  // bookkeeping placeholder only.
-  const inviteBoardMember = (boardId: string, email: string) => {
-    const member: BoardMember = { id: `m_${Date.now()}`, email, role: 'viewer' };
+  // Invite — email gets resolved to a Supabase user_id via the profile
+  // directory. Unknown email = no-op (the user must sign up first).
+  const inviteBoardMember = async (boardId: string, email: string) => {
+    const target = profileByEmail.get(email.trim().toLowerCase());
+    if (!target) { window.alert(`No user found with email ${email}. They must sign up first.`); return; }
+    const member: BoardMember = { id: target.id, email, role: 'viewer' };
     setBoardMembers((prev) => ({ ...prev, [boardId]: [...(prev[boardId] ?? []), member] }));
+    try { await membersApi.addBoardMember(boardId, target.id, 'viewer'); }
+    catch (e) { console.error('inviteBoardMember', e); void refreshHub(); }
   };
 
-  const removeBoardMember = (boardId: string, memberId: string) => {
-    setBoardMembers((prev) => {
-      const list = prev[boardId] ?? [];
-      const target = list.find((m) => m.id === memberId);
-      // Hard guard — the auto-invited master admin can never be removed.
-      if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return prev;
-      return { ...prev, [boardId]: list.filter((m) => m.id !== memberId) };
-    });
+  const removeBoardMember = async (boardId: string, memberId: string) => {
+    const list = boardMembers[boardId] ?? [];
+    const target = list.find((m) => m.id === memberId);
+    if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return;
+    setBoardMembers((prev) => ({ ...prev, [boardId]: (prev[boardId] ?? []).filter((m) => m.id !== memberId) }));
+    try { await membersApi.removeBoardMember(boardId, memberId); }
+    catch (e) { console.error('removeBoardMember', e); void refreshHub(); }
   };
 
-  const inviteFolderMember = (folderId: string, email: string) => {
-    const member: BoardMember = { id: `fm_${Date.now()}`, email, role: 'viewer' };
+  const inviteFolderMember = async (folderId: string, email: string) => {
+    const target = profileByEmail.get(email.trim().toLowerCase());
+    if (!target) { window.alert(`No user found with email ${email}. They must sign up first.`); return; }
+    const member: BoardMember = { id: target.id, email, role: 'viewer' };
     setFolderMembers((prev) => ({ ...prev, [folderId]: [...(prev[folderId] ?? []), member] }));
+    try { await membersApi.addFolderMember(folderId, target.id, 'viewer'); }
+    catch (e) { console.error('inviteFolderMember', e); void refreshHub(); }
   };
 
-  const removeFolderMember = (folderId: string, memberId: string) => {
-    setFolderMembers((prev) => {
-      const list = prev[folderId] ?? [];
-      const target = list.find((m) => m.id === memberId);
-      if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return prev;
-      return { ...prev, [folderId]: list.filter((m) => m.id !== memberId) };
-    });
+  const removeFolderMember = async (folderId: string, memberId: string) => {
+    const list = folderMembers[folderId] ?? [];
+    const target = list.find((m) => m.id === memberId);
+    if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return;
+    setFolderMembers((prev) => ({ ...prev, [folderId]: (prev[folderId] ?? []).filter((m) => m.id !== memberId) }));
+    try { await membersApi.removeFolderMember(folderId, memberId); }
+    catch (e) { console.error('removeFolderMember', e); void refreshHub(); }
   };
 
   // ── Folder mutations ──────────────────────────────────────────────────────
-  // Master admin gets auto-invited to every new board/folder so they can see
-  // everyone's work without having to be hand-invited by each user.
-  const autoInviteMaster = (): BoardMember | null => {
-    if (OWNER_EMAIL.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return null;
-    return { id: `m_master_${Date.now()}`, email: MASTER_ADMIN_EMAIL_PH, role: 'master_admin' };
+  // Auto-invite master admin to every new board/folder so they can see all work.
+  const autoInviteMaster = async (kind: 'board' | 'folder', resourceId: string): Promise<void> => {
+    if (OWNER_EMAIL.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return;
+    const master = profileByEmail.get(MASTER_ADMIN_EMAIL_PH);
+    if (!master) return;
+    try {
+      if (kind === 'board') await membersApi.addBoardMember(resourceId, master.id, 'admin');
+      else                  await membersApi.addFolderMember(resourceId, master.id, 'admin');
+    } catch (e) { console.error('autoInviteMaster', e); }
   };
 
-  const createFolder = (name: string) => {
+  const createFolder = async (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const folder: Folder = { id: `folder_${Date.now()}`, name: trimmed, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME };
-    setFolders((prev) => [...prev, folder]);
-    const master = autoInviteMaster();
-    if (master) setFolderMembers((prev) => ({ ...prev, [folder.id]: [master] }));
+    try {
+      const created = await foldersApi.createFolder(trimmed);
+      const folder = folderFromApi(created);
+      setFolders((prev) => [...prev, folder]);
+      await autoInviteMaster('folder', folder.id);
+    } catch (e) { console.error('createFolder', e); }
   };
-  const renameFolder = (id: string, name: string) => {
+
+  const renameFolder = async (id: string, name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return;
     setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
+    try { await foldersApi.renameFolder(id, trimmed); }
+    catch (e) { console.error('renameFolder', e); void refreshHub(); }
   };
-  const deleteFolder = (id: string) => {
+
+  const deleteFolder = async (id: string) => {
     const folder = folders.find((f) => f.id === id);
-    if (folder) {
-      const item: RecycledItem = {
-        kind: 'folder', id,
-        deletedAt: new Date().toISOString(),
-        deletedBy: getCurrentUser()?.email ?? '',
-        payload: { folder, members: folderMembers[id] ?? [] },
-      };
-      setRecycleBin((prev) => [item, ...prev]);
-    }
-    setBoards((prev) => prev.map((b) => (b.folderId === id ? { ...b, folderId: null } : b)));
-    setFolders((prev) => prev.filter((f) => f.id !== id));
-    setFolderMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+    try {
+      if (folder) {
+        await recycleApi.pushToRecycleBin('folder', { folder, members: folderMembers[id] ?? [] });
+      }
+      // Boards inside the folder are detached server-side via ON DELETE SET NULL.
+      await foldersApi.deleteFolder(id);
+      setBoards((prev) => prev.map((b) => (b.folderId === id ? { ...b, folderId: null } : b)));
+      setFolders((prev) => prev.filter((f) => f.id !== id));
+      setFolderMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+    } catch (e) { console.error('deleteFolder', e); void refreshHub(); }
   };
-  const moveBoardToFolder = (boardId: string, folderId: string | null) => {
+
+  const moveBoardToFolder = async (boardId: string, folderId: string | null) => {
     setBoards((prev) => prev.map((b) => (b.id === boardId ? { ...b, folderId } : b)));
+    try { await boardsApi.updateBoard(boardId, { folderId }); }
+    catch (e) { console.error('moveBoardToFolder', e); void refreshHub(); }
   };
   const toggleFolderCollapse = (id: string) => {
     setCollapsedFolders((prev) => {
@@ -3580,85 +3700,85 @@ export default function ProspectHub() {
   };
 
   // ── Unload: drop all of MY boards (other users' data is preserved) ───────
-  const unloadDemoData = () => {
-    const myBoardIds = new Set(boards.filter((b) => b.ownerEmail.toLowerCase() === myEmail).map((b) => b.id));
-    if (myBoardIds.size === 0) {
+  const unloadDemoData = async () => {
+    const myBoards = boards.filter((b) => b.ownerEmail.toLowerCase() === myEmail);
+    if (myBoards.length === 0) {
       window.alert('Nothing to unload — you have no boards.');
       return;
     }
-    const ok = window.confirm(`Remove all ${myBoardIds.size} of your boards and their prospects?\n\nBoards owned by other users won't be touched.`);
+    const ok = window.confirm(`Remove all ${myBoards.length} of your boards and their prospects?\n\nBoards owned by other users won't be touched.`);
     if (!ok) return;
-    setBoards((prev) => prev.filter((b) => !myBoardIds.has(b.id)));
-    setBoardProspects((prev) => {
-      const next: Record<string, Prospect[]> = {};
-      for (const [k, v] of Object.entries(prev)) if (!myBoardIds.has(k)) next[k] = v;
-      return next;
-    });
-    setBoardMembers((prev) => {
-      const next: Record<string, BoardMember[]> = {};
-      for (const [k, v] of Object.entries(prev)) if (!myBoardIds.has(k)) next[k] = v;
-      return next;
-    });
-    setActiveBoard((curr) => (curr && myBoardIds.has(curr.id) ? null : curr));
-    setView('board');
-    // Also drop my folders.
-    setFolders((prev) => prev.filter((f) => f.ownerEmail.toLowerCase() !== myEmail));
+    try {
+      // FK ON DELETE CASCADE cleans prospects + memberships server-side.
+      for (const b of myBoards) await boardsApi.deleteBoard(b.id);
+      // Drop my folders too.
+      const myFolders = folders.filter((f) => f.ownerEmail.toLowerCase() === myEmail);
+      for (const f of myFolders) await foldersApi.deleteFolder(f.id);
+      setActiveBoard(null);
+      setView('board');
+      await refreshHub();
+    } catch (e) { console.error('unloadDemoData', e); void refreshHub(); }
   };
 
-  // ── Load 50 × 300 demo dataset (replaces YOUR boards; other users' data is preserved) ─
-  const loadDemoData = () => {
-    const ok = window.confirm('Load 50 demo project boards (300 prospects each) organised into 5 location folders?\n\nThis will REPLACE all of your current boards, folders, & prospects (boards owned by other users are not touched).');
+  // ── Load 50 × 300 demo dataset — uploads to Supabase board by board ───────
+  // Each board does a single chunked insert via importProspects; the api layer
+  // chunks 500 rows at a time so even the 300-row boards go in one request.
+  const loadDemoData = async () => {
+    const ok = window.confirm('Load 50 demo project boards (300 prospects each)?\n\nThis adds ~15,000 prospect rows to your Supabase database. It may take 20–60 seconds.');
     if (!ok) return;
-    const seed = generateDemoSeed(OWNER_EMAIL, OWNER_NAME, 50, 300);
-    const otherOwnedIds = new Set(boards.filter((b) => b.ownerEmail.toLowerCase() !== myEmail).map((b) => b.id));
-    setBoards((prev) => {
-      const others = prev.filter((b) => b.ownerEmail.toLowerCase() !== myEmail);
-      return [...seed.boards, ...others];
-    });
-    setBoardProspects((prev) => {
-      const next: Record<string, Prospect[]> = {};
-      for (const [k, v] of Object.entries(prev)) if (otherOwnedIds.has(k)) next[k] = v;
-      Object.assign(next, seed.prospects);
-      return next;
-    });
-    setBoardMembers((prev) => {
-      const next: Record<string, BoardMember[]> = {};
-      for (const [k, v] of Object.entries(prev)) if (otherOwnedIds.has(k)) next[k] = v;
-      return next;
-    });
-    // Replace MY folders with the 5 demo folders; keep folders owned by others.
-    setFolders((prev) => {
-      const others = prev.filter((f) => f.ownerEmail.toLowerCase() !== myEmail);
-      return [...seed.folders, ...others];
-    });
-    setCollapsedFolders(new Set());
+    try {
+      const seed = generateDemoSeed(OWNER_EMAIL, OWNER_NAME, 50, 300);
+      // Create folders first so boards can reference them.
+      const folderIdMap = new Map<string, string>();
+      for (const f of seed.folders) {
+        const created = await foldersApi.createFolder(f.name);
+        folderIdMap.set(f.id, created.id);
+      }
+      // Now create boards (one at a time so each gets a unique position).
+      for (const b of seed.boards) {
+        const newFolderId = b.folderId ? (folderIdMap.get(b.folderId) ?? null) : null;
+        const created = await boardsApi.createBoard({
+          name: b.name, location: b.location, color: b.color, folderId: newFolderId,
+        });
+        const rowsForBoard = seed.prospects[b.id] ?? [];
+        if (rowsForBoard.length) {
+          await prospectsApi.importProspects(created.id, rowsForBoard, 'append');
+        }
+      }
+      await refreshHub();
+    } catch (e) {
+      console.error('loadDemoData', e);
+      window.alert((e as Error).message);
+      void refreshHub();
+    }
   };
 
   const totalAll = Object.values(boardProspects).reduce((s, arr) => s + arr.length, 0);
 
-  const deleteBoard = (id: string) => {
+  const deleteBoard = async (id: string) => {
     const board = boards.find((b) => b.id === id);
-    if (board) {
-      const item: RecycledItem = {
-        kind: 'board', id,
-        deletedAt: new Date().toISOString(),
-        deletedBy: getCurrentUser()?.email ?? '',
-        payload: { board, prospects: boardProspects[id] ?? [], members: boardMembers[id] ?? [] },
-      };
-      setRecycleBin((prev) => [item, ...prev]);
-    }
-    setBoards((prev) => prev.filter((b) => b.id !== id));
-    setBoardProspects((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
-    setBoardMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
-    if (activeBoard?.id === id) { setActiveBoard(null); setView('board'); }
+    try {
+      if (board) {
+        await recycleApi.pushToRecycleBin('board', {
+          board, prospects: boardProspects[id] ?? [], members: boardMembers[id] ?? [],
+        });
+      }
+      await boardsApi.deleteBoard(id);
+      setBoards((prev) => prev.filter((b) => b.id !== id));
+      setBoardProspects((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+      setBoardMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+      if (activeBoard?.id === id) { setActiveBoard(null); setView('board'); }
+    } catch (e) { console.error('deleteBoard', e); void refreshHub(); }
   };
 
-  const createBoard = (name: string, location: string, color: string) => {
-    const newBoard: Board = { id: `board_${Date.now()}`, name, location, color, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME, folderId: null };
-    setBoards((prev) => [...prev, newBoard]);
-    setBoardProspects((prev) => ({ ...prev, [newBoard.id]: [] }));
-    const master = autoInviteMaster();
-    if (master) setBoardMembers((prev) => ({ ...prev, [newBoard.id]: [master] }));
+  const createBoard = async (name: string, location: string, color: string) => {
+    try {
+      const created = await boardsApi.createBoard({ name, location, color });
+      const newBoard = boardFromApi(created);
+      setBoards((prev) => [...prev, newBoard]);
+      setBoardProspects((prev) => ({ ...prev, [newBoard.id]: [] }));
+      await autoInviteMaster('board', newBoard.id);
+    } catch (e) { console.error('createBoard', e); }
   };
 
   const openBoard = (board: Board) => {
@@ -3910,20 +4030,23 @@ export default function ProspectHub() {
   // NOT memoised — these close over `setRows`, which itself depends on
   // folderView / activeBoard. Memoising would freeze them at first render.
   const updateRow = <K extends keyof Prospect>(id: string, key: K, value: Prospect[K]) => {
-    // Permission gate — silently no-op if the role lacks rows.edit
     if (!can('rows.edit')) return;
     if (key === 'lastUpdate') {
       setRows((prev) => prev.map((r) => (r.id === id ? { ...r, lastUpdate: value as string } : r)));
       return;
     }
-    // Agent edits stamp lastUpdate but don't trigger another agent stamp.
     if (key === 'agent') {
       const stamp = nowMyt();
       setRows((prev) => prev.map((r) => (r.id === id ? { ...r, agent: value as string, lastUpdate: stamp } : r)));
+      // `agent` is not mapped to a DB column in api/prospects FIELD_MAP — skip server write.
       return;
     }
     const stamp = nowMyt();
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [key]: value, lastUpdate: stamp } : r)));
+    void prospectsApi.updateProspectField(id, key, value).catch((e) => {
+      console.error('updateProspectField', e);
+      void refreshHub();
+    });
   };
 
   const updateCustom = (rowId: string, colKey: string, value: string) => {
@@ -3934,6 +4057,13 @@ export default function ProspectHub() {
       [rowId]: { ...(prev[rowId] ?? {}), [colKey]: value },
     }));
     setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, lastUpdate: stamp } : r)));
+    // Custom-field write to Supabase — only fires once the field is actually
+    // a real DB-backed custom_fields row (synthetic local-only keys, which
+    // start with `custom_`, may not have a server id yet).
+    if (!colKey.startsWith('custom_')) {
+      void import('@/api/custom-fields').then((m) => m.setCustomValue(rowId, colKey, value))
+        .catch((e) => console.error('setCustomValue', e));
+    }
   };
 
   const setCellValue = (rowId: string, colKey: string, value: string) => {
@@ -3945,19 +4075,24 @@ export default function ProspectHub() {
     }
   };
 
-  const addRow = () => {
-    const newId = String(Date.now());
-    setRows((prev) => [...prev, {
-      id: newId, name: '', unitNo: '', type: '', size: '', phone: '', agent: '', lastUpdate: '',
-      callingStatus: '', listingType: '', furnishing: '',
-      availability: '', askingRent: '', askingPrice: '', remark: '',
-    }]);
-    // The new row may sit outside the virtualization window, so scroll the
-    // container itself to its new bottom — the row will mount on next frame.
-    setTimeout(() => {
-      const el = gridScrollRef.current;
-      if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-    }, 50);
+  const addRow = async () => {
+    // Adding a row requires an active board to attach it to — folder-aggregate
+    // view drops new rows into the first board in the folder.
+    const targetBoardId =
+      activeBoard?.id
+      ?? (folderView && folderViewBoardIds.length ? folderViewBoardIds[0] : null);
+    if (!targetBoardId) {
+      window.alert('Open a board first to add a prospect row.');
+      return;
+    }
+    try {
+      const created = await prospectsApi.createProspect(targetBoardId);
+      setRows((prev) => [...prev, created]);
+      setTimeout(() => {
+        const el = gridScrollRef.current;
+        if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      }, 50);
+    } catch (e) { console.error('addRow', e); }
   };
 
   // Resolve which board a prospect currently lives in (single board view, folder view, or default seed).
@@ -3970,31 +4105,29 @@ export default function ProspectHub() {
     }
     return '__default__';
   };
-  const pushProspectsToBin = (ids: string[]) => {
-    const stamp = new Date().toISOString();
-    const me = getCurrentUser()?.email ?? '';
-    const items: RecycledItem[] = [];
+  const pushProspectsToBin = async (ids: string[]) => {
     for (const id of ids) {
       const prospect = rows.find((r) => r.id === id);
       if (!prospect) continue;
-      items.push({
-        kind: 'prospect', id,
-        deletedAt: stamp, deletedBy: me,
-        payload: { boardId: prospectHomeBoardId(id), prospect, customValues: customValues[id] ?? {} },
-      });
+      try {
+        await recycleApi.pushToRecycleBin('prospect', {
+          boardId: prospectHomeBoardId(id), prospect, customValues: customValues[id] ?? {},
+        });
+      } catch (e) { console.error('pushToRecycleBin', e); }
     }
-    if (items.length) setRecycleBin((prev) => [...items, ...prev]);
   };
 
-  const deleteRow = (id: string) => {
-    pushProspectsToBin([id]);
+  const deleteRow = async (id: string) => {
+    await pushProspectsToBin([id]);
     setRows((p) => p.filter((r) => r.id !== id));
     setSelectedRows((p) => { const s = new Set(p); s.delete(id); return s; });
     setCustomValues((p) => { const n = { ...p }; delete n[id]; return n; });
+    try { await prospectsApi.deleteProspect(id); }
+    catch (e) { console.error('deleteProspect', e); void refreshHub(); }
   };
-  const deleteSelected = () => {
+  const deleteSelected = async () => {
     const ids = Array.from(selectedRows);
-    pushProspectsToBin(ids);
+    await pushProspectsToBin(ids);
     setRows((p) => p.filter((r) => !selectedRows.has(r.id)));
     setCustomValues((p) => {
       const n = { ...p };
@@ -4002,45 +4135,65 @@ export default function ProspectHub() {
       return n;
     });
     setSelectedRows(new Set());
+    try { await prospectsApi.deleteProspects(ids); }
+    catch (e) { console.error('deleteProspects', e); void refreshHub(); }
   };
   // ── Recycle Bin: restore + permanently purge ──────────────────────────────
-  const restoreFromBin = (id: string) => {
+  // Restore is best-effort: the DB has already cascaded the deletes, so we
+  // recreate the snapshot in fresh rows and drop the bin entry.
+  const restoreFromBin = async (id: string) => {
     const item = recycleBin.find((x) => x.id === id);
     if (!item) return;
-    if (item.kind === 'board') {
-      const p = item.payload as { board: Board; prospects: Prospect[]; members: BoardMember[] };
-      setBoards((prev) => [...prev, p.board]);
-      setBoardProspects((prev) => ({ ...prev, [p.board.id]: p.prospects }));
-      setBoardMembers((prev) => ({ ...prev, [p.board.id]: p.members }));
-    } else if (item.kind === 'folder') {
-      const p = item.payload as { folder: Folder; members: BoardMember[] };
-      setFolders((prev) => [...prev, p.folder]);
-      setFolderMembers((prev) => ({ ...prev, [p.folder.id]: p.members }));
-    } else if (item.kind === 'prospect') {
-      const p = item.payload as { boardId: string; prospect: Prospect; customValues: Record<string, string> };
-      if (p.boardId === '__default__') {
-        setDefaultRows((prev) => [...prev, p.prospect]);
-      } else {
-        setBoardProspects((prev) => ({ ...prev, [p.boardId]: [...(prev[p.boardId] ?? []), p.prospect] }));
+    try {
+      if (item.kind === 'board') {
+        const p = item.payload as { board: Board; prospects: Prospect[]; members: BoardMember[] };
+        const created = await boardsApi.createBoard({
+          name: p.board.name, location: p.board.location, color: p.board.color, folderId: p.board.folderId,
+        });
+        if (p.prospects.length) {
+          await prospectsApi.importProspects(created.id, p.prospects, 'append');
+        }
+        for (const m of p.members) {
+          const target = profileByEmail.get(m.email.toLowerCase());
+          if (target) await membersApi.addBoardMember(created.id, target.id, m.role as membersApi.MemberRole);
+        }
+      } else if (item.kind === 'folder') {
+        const p = item.payload as { folder: Folder; members: BoardMember[] };
+        const created = await foldersApi.createFolder(p.folder.name);
+        for (const m of p.members) {
+          const target = profileByEmail.get(m.email.toLowerCase());
+          if (target) await membersApi.addFolderMember(created.id, target.id, m.role as membersApi.MemberRole);
+        }
+      } else if (item.kind === 'prospect') {
+        const p = item.payload as { boardId: string; prospect: Prospect; customValues: Record<string, string> };
+        if (p.boardId !== '__default__') {
+          await prospectsApi.importProspects(p.boardId, [p.prospect], 'append');
+        }
       }
-      if (Object.keys(p.customValues).length) {
-        setCustomValues((prev) => ({ ...prev, [p.prospect.id]: p.customValues }));
-      }
-    }
-    setRecycleBin((prev) => prev.filter((x) => x.id !== id));
+      await recycleApi.purgeRecycleItem(id);
+      setRecycleBin((prev) => prev.filter((x) => x.id !== id));
+      await refreshHub();
+    } catch (e) { console.error('restoreFromBin', e); void refreshHub(); }
   };
-  const purgeFromBin = (id: string) => {
+  const purgeFromBin = async (id: string) => {
     setRecycleBin((prev) => prev.filter((x) => x.id !== id));
+    try { await recycleApi.purgeRecycleItem(id); }
+    catch (e) { console.error('purgeFromBin', e); void refreshHub(); }
   };
-  const emptyBin = () => setRecycleBin([]);
+  const emptyBin = async () => {
+    setRecycleBin([]);
+    try { await recycleApi.purgeAllRecycleItems(); }
+    catch (e) { console.error('emptyBin', e); void refreshHub(); }
+  };
 
-  const duplicateRow = (id: string) => {
+  const duplicateRow = async (id: string) => {
     const src = rows.find((r) => r.id === id);
     if (!src) return;
-    const newId  = String(Date.now());
-    const newRow = { ...src, id: newId };
-    setRows((prev) => { const idx = prev.findIndex((r) => r.id === id); const next = [...prev]; next.splice(idx + 1, 0, newRow); return next; });
-    if (customValues[id]) setCustomValues((p) => ({ ...p, [newId]: { ...p[id] } }));
+    try {
+      const created = await prospectsApi.duplicateProspect(id);
+      setRows((prev) => { const idx = prev.findIndex((r) => r.id === id); const next = [...prev]; next.splice(idx + 1, 0, created); return next; });
+      if (customValues[id]) setCustomValues((p) => ({ ...p, [created.id]: { ...p[id] } }));
+    } catch (e) { console.error('duplicateRow', e); }
     setRowMenu(null);
   };
 
@@ -4315,10 +4468,27 @@ export default function ProspectHub() {
 
 
   // ── Import handler ────────────────────────────────────────────────────────
-  const handleImport = (imported: Prospect[], mode: ImportMode) => {
-    if (mode === 'replace') setRows(imported);
-    else setRows((prev) => [...prev, ...imported]);
-    setShowImport(false);
+  // Imports always target a real board on the server; folder-aggregate mode
+  // imports into the first board in the folder. Default-rows view (no board
+  // open) gets a friendly error.
+  const handleImport = async (imported: Prospect[], mode: ImportMode) => {
+    const targetBoardId =
+      activeBoard?.id
+      ?? (folderView && folderViewBoardIds.length ? folderViewBoardIds[0] : null);
+    if (!targetBoardId) {
+      window.alert('Open a board first to import prospects.');
+      return;
+    }
+    try {
+      const rowsWithoutId = imported.map(({ id: _omit, ...rest }) => rest);
+      await prospectsApi.importProspects(targetBoardId, rowsWithoutId, mode === 'replace' ? 'replace' : 'append');
+      await refreshHub();
+    } catch (e) {
+      console.error('importProspects', e);
+      window.alert((e as Error).message);
+    } finally {
+      setShowImport(false);
+    }
   };
 
   const totalWidth = columns.reduce((s, c) => s + c.width, 0) + 40 + 40 + 80; // +checkbox +rowNo +addfield
@@ -4438,10 +4608,12 @@ export default function ProspectHub() {
           arrangeMode={arrangeMode}
           onToggleArrange={() => setArrangeMode((v) => !v)}
           onReorder={(newVisible) => {
-            // Reorder only my visible boards; preserve invisible (other-owners') in their original positions.
             const visibleIds = new Set(newVisible.map((b) => b.id));
             const invisible = boards.filter((b) => !visibleIds.has(b.id));
-            setBoards([...newVisible, ...invisible]);
+            const next = [...newVisible, ...invisible];
+            setBoards(next);
+            void boardsApi.reorderBoards(next.map((b) => b.id))
+              .catch((e) => { console.error('reorderBoards', e); void refreshHub(); });
           }}
           onAddFolder={createFolder}
           onRenameFolder={renameFolder}
