@@ -149,20 +149,3 @@
   ::-webkit-scrollbar-thumb:hover { background: #9CA3AF; }
 }
 
-/* ── Photo Studio animations ──────────────────────────── */
-@keyframes ps-pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.5; }
-}
-@keyframes ps-shimmer-bg {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-@keyframes ps-progress-bar {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
-}
-@keyframes ps-backdrop-pulse {
-  0%, 100% { background: rgba(10, 12, 16, 0.55); }
-  50%      { background: rgba(10, 12, 16, 0.72); }
-}

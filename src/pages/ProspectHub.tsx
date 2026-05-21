@@ -3,12 +3,22 @@ import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx-js-style';
 import {
   Plus, Search, Filter, Download, Upload, ChevronDown, ChevronLeft, ChevronRight, X, Check, Trash2, Copy,
-  AlertCircle, CheckCircle2, Loader2, Users,
+  AlertCircle, CheckCircle2, Loader2, Users, UserPlus,
   GripVertical, Settings2, Mail, Folder as FolderIcon, FolderPlus, Layers,
-  FileText, FileSpreadsheet,
+  FileText, FileSpreadsheet, Eye,
 } from 'lucide-react';
 import * as SliderPrimitive from '@radix-ui/react-slider';
-import { getCurrentUser, listAllUsers } from '@/lib/auth';
+import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage, getUserTier } from '@/lib/auth';
+import { importFromProspect, listClients } from '@/lib/clients';
+
+// Tier display tones — mirror Admin Control's TIER_TONES so badges match
+// across User Setting, sidebar, topbar, and member lists.
+const TIER_BADGE_TONES: Record<string, { bg: string; text: string }> = {
+  'Agent':          { bg: '#E0F2FE', text: '#0369A1' },
+  'Staff':          { bg: '#F3F4F6', text: '#374151' },
+  'Branch Manager': { bg: '#FEF3C7', text: '#92400E' },
+  'Branch Partner': { bg: '#EDE9FE', text: '#7C3AED' },
+};
 
 // ─── Board types ──────────────────────────────────────────────────────────────
 interface Board {
@@ -49,6 +59,14 @@ interface AgentPreset {
   color: string; // palette key — see AGENT_COLOR_PALETTE
 }
 
+// ─── Recycle Bin ────────────────────────────────────────────────────────────
+// Soft-delete: every delete moves the entity into the bin instead of dropping
+// it. Items can be restored or permanently purged from the Recycle Bin modal.
+type RecycledItem =
+  | { kind: 'board';    id: string; deletedAt: string; deletedBy: string; payload: { board: unknown; prospects: unknown; members: unknown } }
+  | { kind: 'folder';   id: string; deletedAt: string; deletedBy: string; payload: { folder: unknown; members: unknown } }
+  | { kind: 'prospect'; id: string; deletedAt: string; deletedBy: string; payload: { boardId: string; prospect: unknown; customValues: unknown } };
+
 // Shared CRM data lives in localStorage so invitations work across users on the
 // same browser. (Same model translates 1:1 to Supabase RLS when wired.)
 const CRM_STORAGE_KEY = 'we.crm.state';
@@ -59,6 +77,7 @@ interface CrmState {
   folders?:      Folder[];
   folderMembers?: Record<string, BoardMember[]>;
   agents?:       AgentPreset[];
+  recycleBin?:   RecycledItem[];
 }
 function loadCrmState(): CrmState | null {
   try {
@@ -300,13 +319,14 @@ function NewBoardModal({ onClose, onCreate }: {
 }
 
 // ─── Board Card ───────────────────────────────────────────────────────────────
-function BoardCard({ board, memberCount, updatedPct, onOpen, onManage, arrangeMode, dragHandlers }: {
+function BoardCard({ board, memberCount, updatedPct, onOpen, onManage, arrangeMode, dragHandlers, showManageGear = true }: {
   board: Board;
   memberCount: number;
   updatedPct: number;
   onOpen: () => void;
   onManage: () => void;
   arrangeMode?: boolean;
+  showManageGear?: boolean;
   dragHandlers?: {
     draggable: boolean;
     onDragStart: () => void;
@@ -332,8 +352,8 @@ function BoardCard({ board, memberCount, updatedPct, onOpen, onManage, arrangeMo
       ].join(' ')}
       style={{ background: board.color, minHeight: 156, boxShadow: '0 4px 14px rgba(0,0,0,0.08)' }}
     >
-      {/* Top-right settings cog (hidden in arrange mode) */}
-      {!arrangeMode && (
+      {/* Top-right settings cog (hidden in arrange mode and when role can't manage) */}
+      {!arrangeMode && showManageGear && (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onManage(); }}
@@ -514,6 +534,139 @@ function ConfirmModal({
   );
 }
 
+// ─── Recycle Bin Modal — restore or permanently delete soft-deleted items ───
+function RecycleBinModal({
+  items, canRestore, canPurge, onRestore, onPurge, onEmpty, onClose,
+}: {
+  items: RecycledItem[];
+  canRestore: boolean;
+  canPurge: boolean;
+  onRestore: (id: string) => void;
+  onPurge: (id: string) => void;
+  onEmpty: () => void;
+  onClose: () => void;
+}) {
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const labelOf = (it: RecycledItem): string => {
+    if (it.kind === 'board')    return (it.payload as { board: Board }).board.name || 'Untitled board';
+    if (it.kind === 'folder')   return (it.payload as { folder: Folder }).folder.name || 'Untitled folder';
+    return (it.payload as { prospect: Prospect }).prospect.name || '(no name)';
+  };
+  const subOf = (it: RecycledItem): string => {
+    if (it.kind === 'board')    return `Board · ${(it.payload as { prospects: Prospect[] }).prospects.length} prospects`;
+    if (it.kind === 'folder')   return 'Folder';
+    return 'Prospect row';
+  };
+  const fmt = (iso: string) => {
+    try { return new Date(iso).toLocaleString('en-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); }
+    catch { return iso; }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
+      <div className="bg-white rounded-2xl w-[520px] max-h-[85vh] flex flex-col overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+        <div className="flex items-start justify-between px-6 pt-5 pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#FEE2E2' }}>
+              <Trash2 size={15} style={{ color: '#DC2626' }} />
+            </div>
+            <div>
+              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Recycle Bin</h3>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
+                {items.length} {items.length === 1 ? 'item' : 'items'} · restore or permanently delete
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
+        </div>
+
+        <div className="flex-1 overflow-auto px-6 pb-2">
+          {items.length === 0 ? (
+            <div className="text-center py-12">
+              <div className="w-12 h-12 mx-auto rounded-full flex items-center justify-center mb-3" style={{ background: '#F3F4F6' }}>
+                <Trash2 size={20} className="text-gray-300" />
+              </div>
+              <p className="text-sm font-medium" style={{ color: '#6B7280' }}>The bin is empty</p>
+              <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>Deleted boards, folders, and rows land here.</p>
+            </div>
+          ) : (
+            <ul className="space-y-1.5">
+              {items.map((it) => (
+                <li key={it.id} className="flex items-center gap-3 px-3 py-2.5 rounded-xl border" style={{ borderColor: '#F1F5F9' }}>
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                    style={{ background: it.kind === 'board' ? '#DAF3F2' : it.kind === 'folder' ? '#EDE9FE' : '#FEF3C7' }}>
+                    {it.kind === 'board'    ? <LayoutGridIcon /> :
+                     it.kind === 'folder'   ? <FolderIcon size={14} style={{ color: '#7C3AED' }} /> :
+                                              <FileText size={14} style={{ color: '#B45309' }} />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold truncate" style={{ color: '#1A202C' }}>{labelOf(it)}</p>
+                    <p className="text-[10px] truncate" style={{ color: '#9CA3AF' }}>
+                      {subOf(it)} · deleted {fmt(it.deletedAt)}{it.deletedBy ? ` by ${it.deletedBy}` : ''}
+                    </p>
+                  </div>
+                  {canRestore && (
+                    <button onClick={() => onRestore(it.id)}
+                      className="text-[11px] font-semibold px-2.5 py-1 rounded-lg border hover:bg-gray-50"
+                      style={{ borderColor: '#E5E7EB', color: '#0F766E' }}>
+                      Restore
+                    </button>
+                  )}
+                  {canPurge && (
+                    <button onClick={() => onPurge(it.id)}
+                      title="Permanently delete"
+                      className="text-[11px] font-semibold px-2.5 py-1 rounded-lg border hover:bg-red-50"
+                      style={{ borderColor: '#FECACA', color: '#DC2626' }}>
+                      Delete forever
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
+          {canPurge && items.length > 0 ? (
+            confirmEmpty ? (
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => setConfirmEmpty(false)}
+                  className="text-xs px-3 py-1 rounded-lg border" style={{ borderColor: '#E5E7EB', color: '#6B7280' }}>Cancel</button>
+                <button onClick={() => { onEmpty(); setConfirmEmpty(false); }}
+                  className="text-xs font-semibold px-3 py-1 rounded-lg text-white"
+                  style={{ background: '#DC2626' }}>Yes, empty bin</button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmEmpty(true)}
+                className="text-xs font-semibold px-3 py-1 rounded-lg border hover:bg-red-50"
+                style={{ borderColor: '#FECACA', color: '#DC2626' }}>Empty bin</button>
+            )
+          ) : <span />}
+          <button onClick={onClose}
+            className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LayoutGridIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0F766E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
 // ─── Combine Folders Modal — pick multiple folders to view as one sheet ─────
 function CombineFoldersModal({
   folders, boards, onSubmit, onClose,
@@ -633,7 +786,7 @@ function BoardOverview({
   boards, folders, folderMemberCounts, collapsedFolders, memberCounts, updatedPcts,
   onOpenBoard, onManageBoard, onManageFolder, onAddBoard, arrangeMode, onToggleArrange, onReorder,
   onAddFolder, onRenameFolder, onDeleteFolder, onMoveBoardToFolder, onToggleFolder,
-  onLoadDemo, onUnloadDemo, onOpenFolderView, onOpenCombinedFolderView, perms,
+  onLoadDemo, onUnloadDemo, onOpenFolderView, onOpenCombinedFolderView, perms, viewAs, recycleCount, onOpenRecycleBin,
 }: {
   boards: Board[];
   folders: Folder[];
@@ -666,7 +819,16 @@ function BoardOverview({
     foldersAssignBoards: boolean;
     foldersViewCombined: boolean;
     foldersManage: boolean;
+    boardsManage: boolean;
     dataDemo: boolean;
+    recycleAccess: boolean;
+  };
+  recycleCount?: number;
+  onOpenRecycleBin?: () => void;
+  viewAs?: {
+    available: boolean;          // only true for the real master admin
+    current: AppRole;            // role currently in effect
+    onChange: (role: AppRole | null) => void;
   };
 }) {
   const [showDemoMenu, setShowDemoMenu] = useState(false);
@@ -679,6 +841,17 @@ function BoardOverview({
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [showDemoMenu]);
+
+  const [showViewAs, setShowViewAs] = useState(false);
+  const viewAsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showViewAs) return;
+    const h = (e: MouseEvent) => {
+      if (viewAsRef.current && !viewAsRef.current.contains(e.target as Node)) setShowViewAs(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [showViewAs]);
 
   // Folder dialog state — replaces native window.prompt / window.confirm
   const [folderPrompt, setFolderPrompt] = useState<
@@ -702,8 +875,9 @@ function BoardOverview({
   };
   const handleDragEnd = () => { dragIndex.current = null; dragBoardId.current = null; };
 
-  // Drop a dragged board onto a folder header → assign it.
+  // Drop a dragged board onto a folder header → assign it (folders.assign_boards).
   const handleDropOnFolder = (folderId: string | null) => {
+    if (!perms.foldersAssignBoards) { dragBoardId.current = null; return; }
     if (dragBoardId.current) onMoveBoardToFolder(dragBoardId.current, folderId);
     dragBoardId.current = null;
   };
@@ -727,6 +901,7 @@ function BoardOverview({
       onOpen={() => onOpenBoard(board)}
       onManage={() => onManageBoard(board)}
       arrangeMode={arrangeMode}
+      showManageGear={perms.boardsManage}
       dragHandlers={arrangeMode ? {
         draggable: true,
         onDragStart: () => handleDragStart(indexInBoards),
@@ -748,6 +923,59 @@ function BoardOverview({
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
+          {viewAs?.available && (() => {
+            const currentRoleDef = APP_ROLES.find((r) => r.id === viewAs.current);
+            const isPreviewing = viewAs.current !== 'master_admin';
+            return (
+              <div ref={viewAsRef} className="relative">
+                <button
+                  onClick={() => setShowViewAs((o) => !o)}
+                  title="Preview Prospect Hub as a different role — connected to Admin Control settings"
+                  className={[
+                    'flex items-center gap-1.5 px-4 py-2 rounded-xl border text-sm font-semibold transition-colors',
+                    isPreviewing ? 'text-white border-transparent' : 'border-gray-200 text-gray-600 hover:border-[#1EC9C4] hover:text-[#1EC9C4] bg-white',
+                  ].join(' ')}
+                  style={isPreviewing ? { background: currentRoleDef?.tone.text ?? '#1EC9C4' } : undefined}>
+                  <Eye size={14} /> View as: {currentRoleDef?.label ?? viewAs.current}
+                  <ChevronDown size={12} className={isPreviewing ? 'text-white/80' : 'text-gray-400'} />
+                </button>
+                {showViewAs && (
+                  <div
+                    className="absolute z-50 right-0 top-full mt-1 min-w-[200px] bg-white rounded-xl border border-gray-100 py-1"
+                    style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}>
+                    <div className="px-3 pt-1 pb-1.5 text-[9px] font-bold uppercase tracking-wider" style={{ color: '#9CA3AF' }}>
+                      Preview Prospect Hub as
+                    </div>
+                    {APP_ROLES.map((r) => (
+                      <button
+                        key={r.id}
+                        onClick={() => {
+                          viewAs.onChange(r.id === 'master_admin' ? null : r.id);
+                          setShowViewAs(false);
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-50 transition-colors text-left">
+                        <span
+                          className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md flex-shrink-0"
+                          style={{ background: r.tone.bg, color: r.tone.text }}>{r.label}</span>
+                        {viewAs.current === r.id && <Check size={11} className="ml-auto text-[#1EC9C4]" strokeWidth={3} />}
+                      </button>
+                    ))}
+                    {isPreviewing && (
+                      <>
+                        <div className="my-1 border-t border-gray-100" />
+                        <button
+                          onClick={() => { viewAs.onChange(null); setShowViewAs(false); }}
+                          className="w-full text-left px-3 py-1.5 text-xs italic hover:bg-gray-50 transition-colors"
+                          style={{ color: '#9CA3AF' }}>
+                          Stop preview
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {perms.boardsReorder && (
             <button
               onClick={onToggleArrange}
@@ -760,6 +988,19 @@ function BoardOverview({
               style={arrangeMode ? { background: '#1EC9C4', borderColor: '#1EC9C4' } : undefined}
             >
               {arrangeMode ? <><Check size={14} strokeWidth={2.5} /> Done</> : <><Settings2 size={14} /> Manage</>}
+            </button>
+          )}
+          {perms.recycleAccess && onOpenRecycleBin && (
+            <button
+              onClick={onOpenRecycleBin}
+              disabled={arrangeMode}
+              title="Restore or permanently delete soft-deleted items"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:border-[#1EC9C4] hover:text-[#1EC9C4] bg-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+              <Trash2 size={14} /> Recycle Bin
+              {(recycleCount ?? 0) > 0 && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                  style={{ background: '#FEE2E2', color: '#DC2626' }}>{recycleCount}</span>
+              )}
             </button>
           )}
           {/* Demo data menu — gated by data.demo */}
@@ -946,24 +1187,120 @@ import {
 // Invite roles mirror the global RBAC roles defined in @/lib/permissions, minus
 // master_admin (which can't be granted via an invitation).
 import type { Role as AppRole } from '@/lib/permissions';
-import { ROLES as APP_ROLES, setUserRole as setUserRoleGlobal, getUserRole, canDo } from '@/lib/permissions';
+import { ROLES as APP_ROLES, setUserRole as setUserRoleGlobal, getUserRole, canDo, getViewAsRole, setViewAsRole } from '@/lib/permissions';
 
 const MASTER_ADMIN_EMAIL_PH = 'linux@whyestate.com';
-function resolveAppRole(email: string | undefined | null): AppRole {
+// Actual stored role — ignores any active "View as" override.
+function actualAppRole(email: string | undefined | null): AppRole {
   if (!email) return 'viewer';
   if (email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return 'master_admin';
   return getUserRole(email);
 }
+// Effective role used for permission checks — only the real master admin
+// may downgrade their view; everyone else gets their stored role.
+function resolveAppRole(email: string | undefined | null): AppRole {
+  const real = actualAppRole(email);
+  if (real === 'master_admin') {
+    const override = getViewAsRole();
+    if (override) return override;
+  }
+  return real;
+}
 type MemberRole = Exclude<AppRole, 'master_admin'>;
+// Owners (and other inviters) can only invite as Editor / Viewer.
+// The Admin role is reserved for the master admin to grant via Admin Control.
 const INVITE_ROLES: { id: MemberRole; label: string }[] = APP_ROLES
-  .filter((r) => r.id !== 'master_admin')
+  .filter((r) => r.id !== 'master_admin' && r.id !== 'admin')
   .map((r) => ({ id: r.id as MemberRole, label: r.label }));
 
 interface BoardMember {
   id: string;
   email: string;
   name?: string;
-  role: MemberRole | 'Owner';
+  // Stored role can be any app role (including master_admin for the auto-invited
+  // master). The UI invite picker still excludes master_admin via INVITE_ROLES.
+  role: AppRole | 'Owner';
+}
+
+// ─── Shared invite-email autocomplete ────────────────────────────────────────
+// Drop-in replacement for a plain email <input> in the Invite Member section.
+// Surfaces every registered user (from the local directory) as a click-to-pick
+// list, filtered by what the user types. Hides owner + already-invited emails.
+function InviteEmailAutocomplete({
+  value, onChange, ownerEmail, existingMemberEmails,
+}: {
+  value: string;
+  onChange: (email: string) => void;
+  ownerEmail: string;
+  existingMemberEmails: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const lowerVal = value.trim().toLowerCase();
+  const ownerLower = ownerEmail.toLowerCase();
+  const memberSet  = new Set(existingMemberEmails.map((e) => e.toLowerCase()));
+  const candidates = listAllUsers().filter((u) => {
+    const e = u.email.toLowerCase();
+    if (e === ownerLower)  return false;
+    if (memberSet.has(e))  return false;
+    if (!lowerVal)         return true;
+    return u.name.toLowerCase().includes(lowerVal) || e.includes(lowerVal);
+  });
+
+  return (
+    <div ref={wrapRef} className="flex-1 relative">
+      <input
+        value={value}
+        onChange={(e) => { onChange(e.target.value); if (!open) setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder="Email or pick a registered user"
+        type="email"
+        className="w-full px-3 py-2 rounded-lg border outline-none text-sm"
+        style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }}
+      />
+      {open && candidates.length > 0 && (
+        <div
+          className="absolute z-50 left-0 right-0 top-full mt-1 bg-white rounded-xl border border-gray-100 py-1 max-h-64 overflow-auto"
+          style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}>
+          <div className="px-3 pt-1 pb-1.5 text-[9px] font-bold uppercase tracking-wider" style={{ color: '#9CA3AF' }}>
+            Registered users · {candidates.length}
+          </div>
+          {candidates.slice(0, 12).map((u) => {
+            const initials = u.name.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
+            return (
+              <button
+                key={u.email}
+                onClick={() => { onChange(u.email); setOpen(false); }}
+                className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-gray-50 transition-colors text-left">
+                <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: '#1EC9C4' }}>
+                  <span className="text-[9px] font-bold text-white">{initials}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold truncate" style={{ color: '#2B3340' }}>{u.name}</p>
+                  <p className="text-[10px] truncate" style={{ color: '#9CA3AF' }}>{u.email}</p>
+                </div>
+              </button>
+            );
+          })}
+          {candidates.length > 12 && (
+            <div className="px-3 py-1.5 text-[10px] italic" style={{ color: '#9CA3AF' }}>
+              + {candidates.length - 12} more — keep typing to narrow…
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ManageBoardModal({
@@ -983,7 +1320,7 @@ function ManageBoardModal({
   members: BoardMember[];
   onClose: () => void;
   onSave: (patch: { name: string; location: string; color: string }) => void;
-  onInvite: (email: string, role: MemberRole) => void;
+  onInvite: (email: string) => void;
   onRemoveMember: (id: string) => void;
   onDelete: () => void;
 }) {
@@ -991,7 +1328,6 @@ function ManageBoardModal({
   const [location, setLocation] = useState(board.location);
   const [color, setColor]       = useState(board.color);
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole]   = useState<MemberRole>('editor');
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Permission gates (driven by Admin Control → Prospect Hub Setting matrix)
@@ -1012,7 +1348,7 @@ function ManageBoardModal({
   const submitInvite = () => {
     const e = inviteEmail.trim();
     if (!e || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return;
-    onInvite(e, inviteRole);
+    onInvite(e);
     setInviteEmail('');
   };
 
@@ -1036,19 +1372,19 @@ function ManageBoardModal({
             <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Settings</p>
 
             <label className="text-xs font-semibold mb-1.5 block" style={{ color: '#374151' }}>Board Name</label>
-            <input value={name} onChange={(e) => setName(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm mb-4"
+            <input value={name} onChange={(e) => setName(e.target.value)} disabled={!canEdit}
+              className="w-full px-3 py-2 rounded-lg border outline-none text-sm mb-4 disabled:opacity-60 disabled:cursor-not-allowed"
               style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
 
             <label className="text-xs font-semibold mb-1.5 block" style={{ color: '#374151' }}>Subtitle <span className="text-gray-400 font-normal">(optional)</span></label>
-            <input value={location} onChange={(e) => setLocation(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm mb-4"
+            <input value={location} onChange={(e) => setLocation(e.target.value)} disabled={!canEdit}
+              className="w-full px-3 py-2 rounded-lg border outline-none text-sm mb-4 disabled:opacity-60 disabled:cursor-not-allowed"
               style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
 
             <label className="text-xs font-semibold mb-2 block" style={{ color: '#374151' }}>Color</label>
-            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+            <div className={`flex flex-wrap items-center gap-1.5 mb-3 ${canEdit ? '' : 'opacity-50 pointer-events-none'}`}>
               {BOARD_COLORS.map((c) => (
-                <button key={c} type="button" onClick={() => setColor(c)}
+                <button key={c} type="button" onClick={() => setColor(c)} disabled={!canEdit}
                   className="w-6 h-6 shrink-0 rounded-full transition-transform hover:scale-110 flex items-center justify-center"
                   style={{ background: c, boxShadow: color === c && BOARD_COLORS.includes(color) ? `0 0 0 2px white, 0 0 0 4px ${c}` : 'none' }}>
                   {color === c && BOARD_COLORS.includes(color) && <Check size={11} className="text-white" strokeWidth={3} />}
@@ -1066,24 +1402,27 @@ function ManageBoardModal({
                 ) : (
                   <Plus size={12} strokeWidth={2.5} style={{ color: '#7C8AA0' }} />
                 )}
-                <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+                <input type="color" value={color} onChange={(e) => setColor(e.target.value)} disabled={!canEdit}
                   className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
               </label>
             </div>
 
             <div className="flex items-center gap-2 mb-4">
               <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color }} />
-              <input value={color} onChange={(e) => setColor(e.target.value)}
-                className="flex-1 px-3 py-2 rounded-lg border outline-none text-xs font-mono"
+              <input value={color} onChange={(e) => setColor(e.target.value)} disabled={!canEdit}
+                className="flex-1 px-3 py-2 rounded-lg border outline-none text-xs font-mono disabled:opacity-60 disabled:cursor-not-allowed"
                 style={{ borderColor: '#E5E7EB', background: '#FAFBFC', color: '#374151' }} />
             </div>
 
-            <button onClick={submitSave} disabled={!dirty || !name.trim() || !canEdit}
-              className="px-5 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
-              style={{ background: '#1EC9C4' }}
-              title={!canEdit ? 'Your role does not have permission to edit board settings' : undefined}>
-              Save Changes
-            </button>
+            {canEdit ? (
+              <button onClick={submitSave} disabled={!dirty || !name.trim()}
+                className="px-5 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+                style={{ background: '#1EC9C4' }}>
+                Save Changes
+              </button>
+            ) : (
+              <p className="text-[11px] italic" style={{ color: '#9CA3AF' }}>Your role does not have permission to edit board settings.</p>
+            )}
           </section>
 
           {/* Members */}
@@ -1118,10 +1457,12 @@ function ManageBoardModal({
                     const isSignedUp = !!nickname;
                     return (
                       <div key={m.id} className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border" style={{ borderColor: '#F1F5F9' }}>
-                        <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
-                          style={{ background: isSignedUp ? '#1EC9C4' : '#F3F4F6' }}>
+                        <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden"
+                          style={{ background: isSignedUp ? getAvatarColor(m.email) : '#F3F4F6' }}>
                           {isSignedUp
-                            ? <span className="text-[10px] font-bold text-white">{initials}</span>
+                            ? (getAvatarImage(m.email)
+                                ? <img src={getAvatarImage(m.email) as string} alt="" className="w-full h-full object-cover" />
+                                : <span className="text-[10px] font-bold text-white">{initials}</span>)
                             : <Mail size={12} style={{ color: '#9CA3AF' }} />
                           }
                         </div>
@@ -1139,19 +1480,17 @@ function ManageBoardModal({
                           )}
                         </div>
                         {(() => {
-                          // Tolerate legacy stored values like "Editor"/"Viewer" by lowercasing.
-                          const roleKey = String(m.role).toLowerCase() as AppRole;
-                          const def = APP_ROLES.find((r) => r.id === roleKey);
-                          const label = def?.label ?? String(m.role);
-                          const tone  = def?.tone ?? { bg: '#F3F4F6', text: '#374151' };
+                          // Show the member's Tier (Agent / Staff / Branch Manager / Branch Partner).
+                          const tier = getUserTier(m.email);
+                          const tone = TIER_BADGE_TONES[tier] ?? { bg: '#F3F4F6', text: '#374151' };
                           return (
                             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md flex-shrink-0"
                               style={{ background: tone.bg, color: tone.text }}>
-                              {label}
+                              {tier}
                             </span>
                           );
                         })()}
-                        {canRemoveMem && (
+                        {canRemoveMem && m.email.toLowerCase() !== MASTER_ADMIN_EMAIL_PH && (
                           <button onClick={() => onRemoveMember(m.id)}
                             className="p-1.5 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0"
                             title="Remove member">
@@ -1171,26 +1510,21 @@ function ManageBoardModal({
             <section>
               <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Invite Member</p>
               <div className="flex items-center gap-2 mb-2">
-                <input
+                <InviteEmailAutocomplete
                   value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') submitInvite(); }}
-                  placeholder="Email address"
-                  type="email"
-                  className="flex-1 px-3 py-2 rounded-lg border outline-none text-sm"
-                  style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }}
+                  onChange={setInviteEmail}
+                  ownerEmail={ownerEmail}
+                  existingMemberEmails={members.map((m) => m.email)}
                 />
-                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as MemberRole)}
-                  className="px-3 py-2 rounded-lg border outline-none text-sm bg-white"
-                  style={{ borderColor: '#E5E7EB' }}>
-                  {INVITE_ROLES.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
-                </select>
               </div>
               <button onClick={submitInvite}
                 className="w-full px-5 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90 transition-opacity"
                 style={{ background: '#1EC9C4' }}>
                 Send Invite
               </button>
+              <p className="text-[10px] mt-2" style={{ color: '#9CA3AF' }}>
+                Members inherit their permission from Admin Control → User Setting.
+              </p>
             </section>
           ) : null}
 
@@ -1246,19 +1580,18 @@ function ManageFolderModal({
   canDelete: boolean;
   onClose: () => void;
   onRename: (name: string) => void;
-  onInvite: (email: string, role: MemberRole) => void;
+  onInvite: (email: string) => void;
   onRemoveMember: (id: string) => void;
   onDelete: () => void;
 }) {
   const [name, setName] = useState(folder.name);
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole]   = useState<MemberRole>('editor');
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const submitInvite = () => {
     const e = inviteEmail.trim();
     if (!e || !e.includes('@')) return;
-    onInvite(e, inviteRole);
+    onInvite(e);
     setInviteEmail('');
   };
   const saveName = () => {
@@ -1334,10 +1667,10 @@ function ManageFolderModal({
                     const nickname = dir.get(m.email.toLowerCase());
                     const initials = (nickname || m.email).split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
                     const isSignedUp = !!nickname;
-                    const roleKey = String(m.role).toLowerCase() as AppRole;
-                    const def = APP_ROLES.find((r) => r.id === roleKey);
-                    const label = def?.label ?? String(m.role);
-                    const tone  = def?.tone ?? { bg: '#F3F4F6', text: '#374151' };
+                    // Show the member's Tier (Agent / Staff / Branch Manager / Branch Partner).
+                    const tier = getUserTier(m.email);
+                    const label = tier;
+                    const tone  = TIER_BADGE_TONES[tier] ?? { bg: '#F3F4F6', text: '#374151' };
                     return (
                       <div key={m.id} className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border" style={{ borderColor: '#F1F5F9' }}>
                         <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
@@ -1361,7 +1694,7 @@ function ManageFolderModal({
                         </div>
                         <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md flex-shrink-0"
                           style={{ background: tone.bg, color: tone.text }}>{label}</span>
-                        {canRemoveMembers && (
+                        {canRemoveMembers && m.email.toLowerCase() !== MASTER_ADMIN_EMAIL_PH && (
                           <button onClick={() => onRemoveMember(m.id)}
                             className="p-1.5 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0"
                             title="Remove member">
@@ -1381,20 +1714,12 @@ function ManageFolderModal({
             <section>
               <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Invite Member</p>
               <div className="flex items-center gap-2 mb-2">
-                <input
+                <InviteEmailAutocomplete
                   value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') submitInvite(); }}
-                  placeholder="Email address"
-                  type="email"
-                  className="flex-1 px-3 py-2 rounded-lg border outline-none text-sm"
-                  style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }}
+                  onChange={setInviteEmail}
+                  ownerEmail={ownerEmail}
+                  existingMemberEmails={members.map((m) => m.email)}
                 />
-                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as MemberRole)}
-                  className="px-3 py-2 rounded-lg border outline-none text-sm bg-white"
-                  style={{ borderColor: '#E5E7EB' }}>
-                  {INVITE_ROLES.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
-                </select>
               </div>
               <button onClick={submitInvite}
                 className="w-full px-5 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90 transition-opacity"
@@ -1402,7 +1727,7 @@ function ManageFolderModal({
                 Send Invite
               </button>
               <p className="text-[10px] mt-2" style={{ color: '#9CA3AF' }}>
-                Invited members can see this folder and every board inside it.
+                Invited members can see this folder and every board inside it. Permissions come from Admin Control → User Setting.
               </p>
             </section>
           )}
@@ -1768,9 +2093,10 @@ function AgentBadge({ name, color }: { name: string; color: string }) {
   );
 }
 
-function AgentDropdown({ value, presets, onChange, onAddPreset, onRemovePreset }: {
+function AgentDropdown({ value, presets, canManage, onChange, onAddPreset, onRemovePreset }: {
   value: string;
   presets: AgentPreset[];
+  canManage: boolean;
   onChange: (name: string) => void;
   onAddPreset: (name: string, color: string) => AgentPreset;
   onRemovePreset: (id: string) => void;
@@ -1823,12 +2149,14 @@ function AgentDropdown({ value, presets, onChange, onAddPreset, onRemovePreset }
                 <AgentBadge name={p.name} color={p.color} />
                 {value === p.name && <Check size={11} className="ml-auto text-[#1EC9C4]" />}
               </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onRemovePreset(p.id); }}
-                title={`Remove ${p.name}`}
-                className="opacity-0 group-hover/row:opacity-100 p-1 mr-1 rounded hover:bg-red-50 transition-all">
-                <Trash2 size={11} className="text-gray-400 hover:text-red-500" />
-              </button>
+              {canManage && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onRemovePreset(p.id); }}
+                  title={`Remove ${p.name}`}
+                  className="opacity-0 group-hover/row:opacity-100 p-1 mr-1 rounded hover:bg-red-50 transition-all">
+                  <Trash2 size={11} className="text-gray-400 hover:text-red-500" />
+                </button>
+              )}
             </div>
           ))}
 
@@ -1842,9 +2170,9 @@ function AgentDropdown({ value, presets, onChange, onAddPreset, onRemovePreset }
             </>
           )}
 
-          <div className="my-1 border-t border-gray-100" />
+          {canManage && <div className="my-1 border-t border-gray-100" />}
 
-          {!adding ? (
+          {canManage && (!adding ? (
             <button onClick={() => setAdding(true)}
               className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-50 transition-colors text-[#0F766E]">
               <Plus size={12} strokeWidth={2.5} /> Add agent
@@ -1913,7 +2241,7 @@ function AgentDropdown({ value, presets, onChange, onAddPreset, onRemovePreset }
                   style={{ background: '#1EC9C4' }}>Save</button>
               </div>
             </div>
-          )}
+          ))}
         </div>
       )}
     </div>
@@ -1960,12 +2288,15 @@ function TextCell({ value, onChange, align = 'left', mono = false, placeholder =
 }
 
 // ─── Row menu ─────────────────────────────────────────────────────────────────
-function RowMenu({ onDelete, onDuplicate, onClose, canDelete, canDuplicate }: {
+function RowMenu({ anchorRect, onDelete, onDuplicate, onImportClient, onClose, canDelete, canDuplicate, importedAlready }: {
+  anchorRect: DOMRect;
   onDelete: () => void;
   onDuplicate: () => void;
+  onImportClient: () => void;
   onClose: () => void;
   canDelete: boolean;
   canDuplicate: boolean;
+  importedAlready: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1973,13 +2304,35 @@ function RowMenu({ onDelete, onDuplicate, onClose, canDelete, canDuplicate }: {
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [onClose]);
-  // If neither action is allowed, render nothing (caller can choose to also hide the trigger).
-  if (!canDelete && !canDuplicate) return null;
-  return (
-    <div ref={ref} className="absolute z-50 right-0 top-full mt-0.5 bg-white rounded-xl shadow-xl border border-gray-100 py-1 w-40" style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}>
+  // Import is available to anyone with read access (always available here).
+  // We still hide the menu entirely if there's literally nothing to do.
+  const items = (canDuplicate ? 1 : 0) + (canDelete ? 1 : 0) + 1; // +1 for Import
+  if (items === 0) return null;
+
+  // Position the menu just below the ⋯ trigger, flipping above when it would
+  // run off the bottom of the viewport. Portals to body so it can never be
+  // clipped by the scrolling table.
+  const MENU_W = 190;
+  const MENU_H = items * 32 + 8;
+  const spaceBelow = window.innerHeight - anchorRect.bottom;
+  const openUp = spaceBelow < MENU_H + 8;
+  const top = openUp ? Math.max(8, anchorRect.top - MENU_H - 4) : anchorRect.bottom + 4;
+  const left = Math.min(window.innerWidth - MENU_W - 8, Math.max(8, anchorRect.right - MENU_W));
+
+  return createPortal(
+    <div ref={ref}
+      style={{ position: 'fixed', top, left, width: MENU_W, zIndex: 9999, boxShadow: '0 8px 24px rgba(0,0,0,0.14)' }}
+      className="bg-white rounded-xl border border-gray-100 py-1">
+      <button onClick={onImportClient}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-50"
+        style={{ color: importedAlready ? '#9CA3AF' : '#0F766E' }}>
+        <UserPlus size={13} />
+        {importedAlready ? 'Re-sync to Clients' : 'Import as Client'}
+      </button>
       {canDuplicate && <button onClick={onDuplicate} className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"><Copy size={13} /> Duplicate row</button>}
       {canDelete    && <button onClick={onDelete}    className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-500 hover:bg-red-50"><Trash2 size={13} /> Delete row</button>}
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2808,10 +3161,12 @@ function CustomSelectCell({ value, options, onChange }: { value: string; options
 }
 
 // ─── Editable header cell ─────────────────────────────────────────────────────
-function HeaderCell({ col, onRename, onDelete }: {
+function HeaderCell({ col, onRename, onDelete, canEdit, canDelete }: {
   col: ColDef;
   onRename: (key: string, label: string) => void;
   onDelete: (key: string) => void;
+  canEdit: boolean;
+  canDelete: boolean;
 }) {
   const [editing, setEditing]     = useState(false);
   const [draft, setDraft]         = useState(col.label);
@@ -2865,14 +3220,14 @@ function HeaderCell({ col, onRename, onDelete }: {
   return (
     <span className="flex items-center gap-1 group/header w-full">
       <span
-        onDoubleClick={() => !col.fixed && setEditing(true)}
+        onDoubleClick={() => !col.fixed && canEdit && setEditing(true)}
         className="truncate flex-1"
-        title={col.fixed ? col.label : 'Double-click to rename'}
-        style={{ cursor: col.fixed ? 'default' : 'text' }}
+        title={col.fixed ? col.label : (canEdit ? 'Double-click to rename' : undefined)}
+        style={{ cursor: col.fixed || !canEdit ? 'default' : 'text' }}
       >{col.label}</span>
 
-      {/* ⋯ button — custom columns only */}
-      {!col.fixed && (
+      {/* ⋯ button — custom columns only, and only if user can rename or delete */}
+      {!col.fixed && (canEdit || canDelete) && (
         <button
           ref={btnRef}
           onClick={openMenu}
@@ -2898,19 +3253,23 @@ function HeaderCell({ col, onRename, onDelete }: {
             padding: '4px 0',
           }}
         >
-          <button
-            onClick={() => { setMenuOpen(false); setEditing(true); }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
-          >
-            <span style={{ fontSize: 13 }}>✎</span> Rename field
-          </button>
-          <div style={{ borderTop: '1px solid #F3F4F6', margin: '2px 0' }} />
-          <button
-            onClick={() => { setMenuOpen(false); onDelete(col.key); }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 hover:bg-red-50"
-          >
-            <Trash2 size={12} /> Delete field
-          </button>
+          {canEdit && (
+            <button
+              onClick={() => { setMenuOpen(false); setEditing(true); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+            >
+              <span style={{ fontSize: 13 }}>✎</span> Rename field
+            </button>
+          )}
+          {canEdit && canDelete && <div style={{ borderTop: '1px solid #F3F4F6', margin: '2px 0' }} />}
+          {canDelete && (
+            <button
+              onClick={() => { setMenuOpen(false); onDelete(col.key); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 hover:bg-red-50"
+            >
+              <Trash2 size={12} /> Delete field
+            </button>
+          )}
         </div>,
         document.body
       )}
@@ -3055,7 +3414,7 @@ export default function ProspectHub() {
         ...f,
         ownerName: f.ownerName ?? (f.ownerEmail ? f.ownerEmail.split('@')[0] : ''),
       }));
-      return { boards, prospects: loaded.prospects ?? {}, members: loaded.members ?? {}, folders, folderMembers: loaded.folderMembers ?? {}, agents: loaded.agents ?? [] };
+      return { boards, prospects: loaded.prospects ?? {}, members: loaded.members ?? {}, folders, folderMembers: loaded.folderMembers ?? {}, agents: loaded.agents ?? [], recycleBin: loaded.recycleBin ?? [] };
     }
     // First-time-ever bootstrap on this browser → seed demo data owned by current user.
     const seedBoards: Board[] = SEED_BOARDS_TEMPLATE.map((b) => ({ ...b, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME, folderId: null }));
@@ -3067,7 +3426,7 @@ export default function ProspectHub() {
       board_5: seedProspects.slice(15, 17),
       board_6: seedProspects.slice(17),
     };
-    return { boards: seedBoards, prospects: seedByBoard, members: {} as Record<string, BoardMember[]>, folders: [] as Folder[], folderMembers: {} as Record<string, BoardMember[]>, agents: [] as AgentPreset[] };
+    return { boards: seedBoards, prospects: seedByBoard, members: {} as Record<string, BoardMember[]>, folders: [] as Folder[], folderMembers: {} as Record<string, BoardMember[]>, agents: [] as AgentPreset[], recycleBin: [] as RecycledItem[] };
   })();
 
   // ── Board state ───────────────────────────────────────────────────────────
@@ -3083,6 +3442,8 @@ export default function ProspectHub() {
   const [folders, setFolders]                   = useState<Folder[]>(initialState.folders);
   const [folderMembers, setFolderMembers]       = useState<Record<string, BoardMember[]>>(initialState.folderMembers);
   const [agentPresets, setAgentPresets]         = useState<AgentPreset[]>(initialState.agents);
+  const [recycleBin, setRecycleBin]             = useState<RecycledItem[]>(initialState.recycleBin);
+  const [showRecycleBin, setShowRecycleBin]     = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   // Folder-aggregate view supports either a single folder or a combined set of folders.
   const [folderView, setFolderView]             = useState<{ name: string; folderIds: string[] } | null>(null);
@@ -3108,8 +3469,8 @@ export default function ProspectHub() {
 
   // ── Persist any change back to shared localStorage ────────────────────────
   useEffect(() => {
-    saveCrmState({ boards, prospects: boardProspects, members: boardMembers, folders, folderMembers, agents: agentPresets });
-  }, [boards, boardProspects, boardMembers, folders, folderMembers, agentPresets]);
+    saveCrmState({ boards, prospects: boardProspects, members: boardMembers, folders, folderMembers, agents: agentPresets, recycleBin });
+  }, [boards, boardProspects, boardMembers, folders, folderMembers, agentPresets, recycleBin]);
 
   // ── Agent preset CRUD ─────────────────────────────────────────────────────
   const addAgentPreset = (name: string, color: string): AgentPreset => {
@@ -3138,33 +3499,53 @@ export default function ProspectHub() {
     if (activeBoard?.id === id) setActiveBoard((prev) => (prev ? { ...prev, ...patch } : prev));
   };
 
-  const inviteBoardMember = (boardId: string, email: string, role: MemberRole) => {
-    const member: BoardMember = { id: `m_${Date.now()}`, email, role };
+  // Invite doesn't set a role — the member's effective permission comes from
+  // their entry in Admin Control → User Setting. The stored `role` is a
+  // bookkeeping placeholder only.
+  const inviteBoardMember = (boardId: string, email: string) => {
+    const member: BoardMember = { id: `m_${Date.now()}`, email, role: 'viewer' };
     setBoardMembers((prev) => ({ ...prev, [boardId]: [...(prev[boardId] ?? []), member] }));
-    // Also seed the invitee's global role so Admin Control → User Setting reflects it.
-    setUserRoleGlobal(email, role);
   };
 
   const removeBoardMember = (boardId: string, memberId: string) => {
-    setBoardMembers((prev) => ({ ...prev, [boardId]: (prev[boardId] ?? []).filter((m) => m.id !== memberId) }));
+    setBoardMembers((prev) => {
+      const list = prev[boardId] ?? [];
+      const target = list.find((m) => m.id === memberId);
+      // Hard guard — the auto-invited master admin can never be removed.
+      if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return prev;
+      return { ...prev, [boardId]: list.filter((m) => m.id !== memberId) };
+    });
   };
 
-  const inviteFolderMember = (folderId: string, email: string, role: MemberRole) => {
-    const member: BoardMember = { id: `fm_${Date.now()}`, email, role };
+  const inviteFolderMember = (folderId: string, email: string) => {
+    const member: BoardMember = { id: `fm_${Date.now()}`, email, role: 'viewer' };
     setFolderMembers((prev) => ({ ...prev, [folderId]: [...(prev[folderId] ?? []), member] }));
-    setUserRoleGlobal(email, role);
   };
 
   const removeFolderMember = (folderId: string, memberId: string) => {
-    setFolderMembers((prev) => ({ ...prev, [folderId]: (prev[folderId] ?? []).filter((m) => m.id !== memberId) }));
+    setFolderMembers((prev) => {
+      const list = prev[folderId] ?? [];
+      const target = list.find((m) => m.id === memberId);
+      if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return prev;
+      return { ...prev, [folderId]: list.filter((m) => m.id !== memberId) };
+    });
   };
 
   // ── Folder mutations ──────────────────────────────────────────────────────
+  // Master admin gets auto-invited to every new board/folder so they can see
+  // everyone's work without having to be hand-invited by each user.
+  const autoInviteMaster = (): BoardMember | null => {
+    if (OWNER_EMAIL.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return null;
+    return { id: `m_master_${Date.now()}`, email: MASTER_ADMIN_EMAIL_PH, role: 'master_admin' };
+  };
+
   const createFolder = (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return;
     const folder: Folder = { id: `folder_${Date.now()}`, name: trimmed, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME };
     setFolders((prev) => [...prev, folder]);
+    const master = autoInviteMaster();
+    if (master) setFolderMembers((prev) => ({ ...prev, [folder.id]: [master] }));
   };
   const renameFolder = (id: string, name: string) => {
     const trimmed = name.trim();
@@ -3172,7 +3553,16 @@ export default function ProspectHub() {
     setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
   };
   const deleteFolder = (id: string) => {
-    // Move boards out of the folder, then drop the folder itself + its member list.
+    const folder = folders.find((f) => f.id === id);
+    if (folder) {
+      const item: RecycledItem = {
+        kind: 'folder', id,
+        deletedAt: new Date().toISOString(),
+        deletedBy: getCurrentUser()?.email ?? '',
+        payload: { folder, members: folderMembers[id] ?? [] },
+      };
+      setRecycleBin((prev) => [item, ...prev]);
+    }
     setBoards((prev) => prev.map((b) => (b.folderId === id ? { ...b, folderId: null } : b)));
     setFolders((prev) => prev.filter((f) => f.id !== id));
     setFolderMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
@@ -3247,7 +3637,19 @@ export default function ProspectHub() {
   const totalAll = Object.values(boardProspects).reduce((s, arr) => s + arr.length, 0);
 
   const deleteBoard = (id: string) => {
+    const board = boards.find((b) => b.id === id);
+    if (board) {
+      const item: RecycledItem = {
+        kind: 'board', id,
+        deletedAt: new Date().toISOString(),
+        deletedBy: getCurrentUser()?.email ?? '',
+        payload: { board, prospects: boardProspects[id] ?? [], members: boardMembers[id] ?? [] },
+      };
+      setRecycleBin((prev) => [item, ...prev]);
+    }
     setBoards((prev) => prev.filter((b) => b.id !== id));
+    setBoardProspects((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+    setBoardMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
     if (activeBoard?.id === id) { setActiveBoard(null); setView('board'); }
   };
 
@@ -3255,6 +3657,8 @@ export default function ProspectHub() {
     const newBoard: Board = { id: `board_${Date.now()}`, name, location, color, ownerEmail: OWNER_EMAIL, ownerName: OWNER_NAME, folderId: null };
     setBoards((prev) => [...prev, newBoard]);
     setBoardProspects((prev) => ({ ...prev, [newBoard.id]: [] }));
+    const master = autoInviteMaster();
+    if (master) setBoardMembers((prev) => ({ ...prev, [newBoard.id]: [master] }));
   };
 
   const openBoard = (board: Board) => {
@@ -3344,7 +3748,7 @@ export default function ProspectHub() {
   const [showFilter, setShowFilter] = useState(false);
   const [filters, setFilters] = useState<Filters>({ callingStatus: [], furnishing: [], availability: [], agent: [], askingRentRange: [0, RENT_MAX], askingPriceRange: [0, PRICE_MAX] });
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
-  const [rowMenu, setRowMenu] = useState<string | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showAddField, setShowAddField] = useState(false);
@@ -3556,12 +3960,41 @@ export default function ProspectHub() {
     }, 50);
   };
 
+  // Resolve which board a prospect currently lives in (single board view, folder view, or default seed).
+  const prospectHomeBoardId = (rowId: string): string => {
+    if (activeBoard) return activeBoard.id;
+    if (folderView) {
+      for (const bid of folderViewBoardIds) {
+        if ((boardProspects[bid] ?? []).some((p) => p.id === rowId)) return bid;
+      }
+    }
+    return '__default__';
+  };
+  const pushProspectsToBin = (ids: string[]) => {
+    const stamp = new Date().toISOString();
+    const me = getCurrentUser()?.email ?? '';
+    const items: RecycledItem[] = [];
+    for (const id of ids) {
+      const prospect = rows.find((r) => r.id === id);
+      if (!prospect) continue;
+      items.push({
+        kind: 'prospect', id,
+        deletedAt: stamp, deletedBy: me,
+        payload: { boardId: prospectHomeBoardId(id), prospect, customValues: customValues[id] ?? {} },
+      });
+    }
+    if (items.length) setRecycleBin((prev) => [...items, ...prev]);
+  };
+
   const deleteRow = (id: string) => {
+    pushProspectsToBin([id]);
     setRows((p) => p.filter((r) => r.id !== id));
     setSelectedRows((p) => { const s = new Set(p); s.delete(id); return s; });
     setCustomValues((p) => { const n = { ...p }; delete n[id]; return n; });
   };
   const deleteSelected = () => {
+    const ids = Array.from(selectedRows);
+    pushProspectsToBin(ids);
     setRows((p) => p.filter((r) => !selectedRows.has(r.id)));
     setCustomValues((p) => {
       const n = { ...p };
@@ -3570,6 +4003,37 @@ export default function ProspectHub() {
     });
     setSelectedRows(new Set());
   };
+  // ── Recycle Bin: restore + permanently purge ──────────────────────────────
+  const restoreFromBin = (id: string) => {
+    const item = recycleBin.find((x) => x.id === id);
+    if (!item) return;
+    if (item.kind === 'board') {
+      const p = item.payload as { board: Board; prospects: Prospect[]; members: BoardMember[] };
+      setBoards((prev) => [...prev, p.board]);
+      setBoardProspects((prev) => ({ ...prev, [p.board.id]: p.prospects }));
+      setBoardMembers((prev) => ({ ...prev, [p.board.id]: p.members }));
+    } else if (item.kind === 'folder') {
+      const p = item.payload as { folder: Folder; members: BoardMember[] };
+      setFolders((prev) => [...prev, p.folder]);
+      setFolderMembers((prev) => ({ ...prev, [p.folder.id]: p.members }));
+    } else if (item.kind === 'prospect') {
+      const p = item.payload as { boardId: string; prospect: Prospect; customValues: Record<string, string> };
+      if (p.boardId === '__default__') {
+        setDefaultRows((prev) => [...prev, p.prospect]);
+      } else {
+        setBoardProspects((prev) => ({ ...prev, [p.boardId]: [...(prev[p.boardId] ?? []), p.prospect] }));
+      }
+      if (Object.keys(p.customValues).length) {
+        setCustomValues((prev) => ({ ...prev, [p.prospect.id]: p.customValues }));
+      }
+    }
+    setRecycleBin((prev) => prev.filter((x) => x.id !== id));
+  };
+  const purgeFromBin = (id: string) => {
+    setRecycleBin((prev) => prev.filter((x) => x.id !== id));
+  };
+  const emptyBin = () => setRecycleBin([]);
+
   const duplicateRow = (id: string) => {
     const src = rows.find((r) => r.id === id);
     if (!src) return;
@@ -3579,6 +4043,42 @@ export default function ProspectHub() {
     if (customValues[id]) setCustomValues((p) => ({ ...p, [newId]: { ...p[id] } }));
     setRowMenu(null);
   };
+
+  // ── Import to Clients module ─────────────────────────────────────────────
+  // Snapshots a prospect row into the Clients module so it can carry follow-up
+  // state and tasks. Idempotent on prospectId — re-importing refreshes the
+  // snapshot fields and bumps the timestamp.
+  const [importedTick, setImportedTick] = useState(0);
+  const importedProspectIds = useMemo(() => {
+    void importedTick; // bust when import happens
+    return new Set(listClients().map((c) => c.prospectId).filter(Boolean) as string[]);
+  }, [importedTick]);
+  const [importToast, setImportToast] = useState<{ name: string; created: boolean } | null>(null);
+
+  const importRowAsClient = (id: string) => {
+    const src = rows.find((r) => r.id === id);
+    if (!src) return;
+    // Resolve the source board name from whichever view we're in.
+    const boardName = activeBoard?.name ?? prospectToBoard.get(id)?.name ?? '';
+    const { client, created } = importFromProspect({
+      prospectId:    src.id,
+      name:          src.name,
+      phone:         src.phone,
+      unitNo:        src.unitNo,
+      boardName,
+      listingType:   src.listingType,
+      askingRent:    src.askingRent,
+      askingPrice:   src.askingPrice,
+      callingStatus: src.callingStatus,
+      remark:        src.remark,
+      agent:         src.agent,
+    }, OWNER_EMAIL);
+    setImportedTick((t) => t + 1);
+    setImportToast({ name: client.name, created });
+    setRowMenu(null);
+    setTimeout(() => setImportToast(null), 2800);
+  };
+
   const toggleRow   = (id: string) => setSelectedRows((p) => { const s = new Set(p); s.has(id) ? s.delete(id) : s.add(id); return s; });
   const toggleAll   = () => setSelectedRows(selectedRows.size === filtered.length ? new Set() : new Set(filtered.map((r) => r.id)));
 
@@ -3804,11 +4304,15 @@ export default function ProspectHub() {
     XLSX.utils.book_append_sheet(wb, ws, 'Prospects');
 
     // ── Freeze the header row so it stays visible while scrolling. ──
+    // xlsx-js-style's WorkbookProperties typing doesn't expose Views/Sheets[].Views,
+    // but the underlying writer reads them. Cast through unknown to keep this concise
+    // without disabling type-checking elsewhere.
     if (!wb.Workbook) wb.Workbook = {};
-    wb.Workbook.Views = [{ RTL: false }];
-    wb.Workbook.Sheets = [{
+    const wbAny = wb.Workbook as unknown as Record<string, unknown>;
+    wbAny.Views = [{ RTL: false }];
+    wbAny.Sheets = [{
       Hidden: 0,
-      Views: [{ RTL: false, FrozenPane: { xSplit: 0, ySplit: 1, state: 'frozen', topLeftCell: 'A2', activePane: 'bottomLeft' } } as never],
+      Views: [{ RTL: false, FrozenPane: { xSplit: 0, ySplit: 1, state: 'frozen', topLeftCell: 'A2', activePane: 'bottomLeft' } }],
     }];
 
     XLSX.writeFile(wb, `${base}.xlsx`);
@@ -3824,8 +4328,28 @@ export default function ProspectHub() {
 
   const totalWidth = columns.reduce((s, c) => s + c.width, 0) + 40 + 40 + 80; // +checkbox +rowNo +addfield
 
+  // Banner shows whenever the real master admin is previewing as a different role.
+  const realRole    = actualAppRole(me?.email);
+  const isPreviewing = realRole === 'master_admin' && myRole !== 'master_admin';
+  const previewDef  = APP_ROLES.find((r) => r.id === myRole);
+
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col" style={{ background: '#F5F7FA' }}>
+
+      {/* ── Preview banner (master admin previewing as another role) ── */}
+      {isPreviewing && (
+        <div className="flex items-center gap-2 px-4 py-1.5 flex-shrink-0" style={{ background: previewDef?.tone.text ?? '#1EC9C4', color: 'white' }}>
+          <Eye size={13} />
+          <span className="text-[11px] font-semibold">
+            Previewing Prospect Hub as <span className="font-bold">{previewDef?.label ?? myRole}</span> — buttons & access reflect the matrix configured in Admin Control.
+          </span>
+          <button
+            onClick={() => { setViewAsRole(null); window.location.reload(); }}
+            className="ml-auto px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider hover:bg-white/20 transition-colors">
+            Stop preview
+          </button>
+        </div>
+      )}
 
       {/* ── Toolbar (grid view only) ──────────────────────────────── */}
       {view === 'grid' && (
@@ -3943,7 +4467,17 @@ export default function ProspectHub() {
             foldersViewCombined: can('folders.view_combined'),
             // Show the manage gear if the user can do anything to the folder.
             foldersManage: can('folders.edit') || can('folders.delete') || can('folders.invite_members') || can('folders.remove_members'),
+            boardsManage:  can('boards.edit') || can('boards.delete') || can('boards.invite_members') || can('boards.remove_members'),
             dataDemo:            can('data.demo'),
+            recycleAccess:       can('recycle.access'),
+          }}
+          recycleCount={recycleBin.length}
+          onOpenRecycleBin={() => setShowRecycleBin(true)}
+          viewAs={{
+            // Only the REAL master admin (ignoring any active preview) sees this.
+            available: actualAppRole(me?.email) === 'master_admin',
+            current: myRole,
+            onChange: (next) => { setViewAsRole(next); window.location.reload(); },
           }}
         />
       )}
@@ -4017,7 +4551,7 @@ export default function ProspectHub() {
                     fontWeight: 600, fontSize: 11, color: '#6B7280',
                     padding: '6px 8px', whiteSpace: 'nowrap',
                   }}>
-                  <HeaderCell col={col} onRename={renameColumn} onDelete={deleteColumn} />
+                  <HeaderCell col={col} onRename={renameColumn} onDelete={deleteColumn} canEdit={can('columns.edit')} canDelete={can('columns.delete')} />
                 </th>
               ))}
 
@@ -4063,15 +4597,23 @@ export default function ProspectHub() {
                     <div className="relative flex items-center justify-center h-full">
                       <span className="group-hover:invisible">{idx + 1}</span>
                       <button
-                        onClick={(e) => { e.stopPropagation(); setRowMenu(rowMenu === row.id ? null : row.id); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (rowMenu?.id === row.id) { setRowMenu(null); return; }
+                          const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                          setRowMenu({ id: row.id, rect });
+                        }}
                         className="absolute invisible group-hover:visible w-5 h-5 flex items-center justify-center text-gray-400 hover:text-gray-700">⋯</button>
-                      {rowMenu === row.id && (
+                      {rowMenu?.id === row.id && (
                         <RowMenu
+                          anchorRect={rowMenu.rect}
                           onDelete={() => { deleteRow(row.id); setRowMenu(null); }}
                           onDuplicate={() => duplicateRow(row.id)}
+                          onImportClient={() => importRowAsClient(row.id)}
                           onClose={() => setRowMenu(null)}
                           canDelete={can('rows.delete')}
                           canDuplicate={can('rows.duplicate')}
+                          importedAlready={importedProspectIds.has(row.id)}
                         />
                       )}
                     </div>
@@ -4145,6 +4687,7 @@ export default function ProspectHub() {
                           <AgentDropdown
                             value={row.agent}
                             presets={agentPresets}
+                            canManage={can('agents.manage')}
                             onChange={(v) => updateRow(row.id, 'agent', v)}
                             onAddPreset={addAgentPreset}
                             onRemovePreset={removeAgentPreset}
@@ -4260,7 +4803,7 @@ export default function ProspectHub() {
             members={boardMembers[b.id] ?? []}
             onClose={() => setManageBoardId(null)}
             onSave={(patch) => updateBoard(b.id, patch)}
-            onInvite={(email, role) => inviteBoardMember(b.id, email, role)}
+            onInvite={(email) => inviteBoardMember(b.id, email)}
             onRemoveMember={(memberId) => removeBoardMember(b.id, memberId)}
             onDelete={() => {
               deleteBoard(b.id);
@@ -4288,12 +4831,41 @@ export default function ProspectHub() {
             canDelete={can('folders.delete')}
             onClose={() => setManageFolderId(null)}
             onRename={(name) => renameFolder(f.id, name)}
-            onInvite={(email, role) => inviteFolderMember(f.id, email, role)}
+            onInvite={(email) => inviteFolderMember(f.id, email)}
             onRemoveMember={(memberId) => removeFolderMember(f.id, memberId)}
             onDelete={() => { deleteFolder(f.id); setManageFolderId(null); }}
           />
         );
       })()}
+
+      {showRecycleBin && (
+        <RecycleBinModal
+          items={recycleBin}
+          canRestore={can('recycle.restore')}
+          canPurge={can('recycle.purge')}
+          onRestore={restoreFromBin}
+          onPurge={purgeFromBin}
+          onEmpty={emptyBin}
+          onClose={() => setShowRecycleBin(false)}
+        />
+      )}
+
+      {/* Import-to-Clients toast — auto-dismisses */}
+      {importToast && (
+        <div className="fixed bottom-6 right-6 z-[9999] flex items-center gap-2.5 bg-white rounded-xl border px-4 py-3 shadow-xl"
+          style={{ borderColor: '#D1F2EF', boxShadow: '0 12px 32px rgba(0,0,0,0.16)' }}>
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+            style={{ background: '#DAF3F2' }}>
+            <UserPlus size={14} style={{ color: '#0F766E' }} strokeWidth={2.5} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-bold" style={{ color: '#1A202C' }}>
+              {importToast.created ? 'Imported to Clients' : 'Synced to existing Client'}
+            </p>
+            <p className="text-[10px] truncate" style={{ color: '#6B7280' }}>{importToast.name}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

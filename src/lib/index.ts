@@ -5,6 +5,7 @@ export const ROUTE_PATHS = {
   LEADS: '/leads',
   LISTINGS: '/listings',
   CONTACTS: '/contacts',
+  CLIENTS: '/clients',
   TENANCY: '/tenancy',
   CALENDAR: '/calendar',
   REPORTS: '/reports',
@@ -13,7 +14,6 @@ export const ROUTE_PATHS = {
   DOCUMENTS: '/documents',
   ADMIN: '/admin',
   SETTINGS: '/settings',
-  PHOTO_STUDIO: '/photo-studio',
 } as const;
 
 // ─── Types ─────────────────────────────────────────────────────────────────

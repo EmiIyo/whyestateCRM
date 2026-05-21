@@ -73,7 +73,7 @@ export default function Landing() {
           <div className="flex flex-wrap justify-center items-center gap-x-6 gap-y-2 mt-8 text-xs" style={{ color: '#94A3B8' }}>
             <span className="flex items-center gap-1.5"><Check size={12} style={{ color: '#10B981' }} /> No credit card required</span>
             <span className="flex items-center gap-1.5"><Check size={12} style={{ color: '#10B981' }} /> Free for your first board</span>
-            <span className="flex items-center gap-1.5"><Check size={12} style={{ color: '#10B981' }} /> KL &amp; Selangor focused</span>
+            <span className="flex items-center gap-1.5"><Check size={12} style={{ color: '#10B981' }} /> Malaysia focused</span>
           </div>
         </div>
       </section>

@@ -9,8 +9,11 @@ import RequireAuth from "@/components/RequireAuth";
 import Landing from "@/pages/Landing";
 import ProspectHub from "@/pages/ProspectHub";
 import AdminControl from "@/pages/AdminControl";
+import MyProfile from "@/pages/MyProfile";
+import CalendarPage from "@/pages/Calendar";
+import DocumentsPage from "@/pages/Documents";
+import ClientsPage from "@/pages/Clients";
 import UnderDevelopment from "@/pages/UnderDevelopment";
-import PhotoStudio from "@/pages/photo-studio/Index";
 import NotFound from "./pages/not-found/Index";
 
 const queryClient = new QueryClient();
@@ -28,28 +31,19 @@ const App = () => (
           {/* Prospect Hub — the only fully-functional module (gated) */}
           <Route path={ROUTE_PATHS.LEADS} element={<RequireAuth><Layout><ProspectHub /></Layout></RequireAuth>} />
 
-          {/* Photo Studio — vision-driven listing photo enhancement */}
-          <Route
-            path={ROUTE_PATHS.PHOTO_STUDIO}
-            element={
-              <RequireAuth requireRoles={['master_admin', 'admin', 'editor']}>
-                <Layout><PhotoStudio /></Layout>
-              </RequireAuth>
-            }
-          />
-
           {/* All other modules — under development (gated) */}
           <Route path={ROUTE_PATHS.DASHBOARD}  element={<RequireAuth><Layout><UnderDevelopment name="Dashboard" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.LISTINGS}   element={<RequireAuth><Layout><UnderDevelopment name="Properties" /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.CONTACTS}   element={<RequireAuth><Layout><UnderDevelopment name="Clients" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CONTACTS}   element={<RequireAuth><Layout><ClientsPage /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CLIENTS}    element={<RequireAuth><Layout><ClientsPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.TENANCY}    element={<RequireAuth><Layout><UnderDevelopment name="Tenancy" /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth><Layout><UnderDevelopment name="Viewings" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth><Layout><CalendarPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.REPORTS}    element={<RequireAuth><Layout><UnderDevelopment name="Reports" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.DEALS}      element={<RequireAuth><Layout><UnderDevelopment name="Deals" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.COMMISSION} element={<RequireAuth><Layout><UnderDevelopment name="Commission" /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth><Layout><UnderDevelopment name="Documents" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth><Layout><DocumentsPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.ADMIN}      element={<RequireAuth masterOnly><Layout><AdminControl /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.SETTINGS}   element={<RequireAuth><Layout><UnderDevelopment name="Settings" /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.SETTINGS}   element={<RequireAuth><Layout><MyProfile /></Layout></RequireAuth>} />
 
           {/* Catch-all */}
           <Route path="*" element={<NotFound />} />

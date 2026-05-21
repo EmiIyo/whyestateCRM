@@ -46,14 +46,22 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: 'columns.edit',          label: 'Rename column',                   group: 'Columns' },
   { key: 'columns.delete',        label: 'Delete column',                   group: 'Columns' },
 
+  // Agents (shared preset list in the Agent column dropdown)
+  { key: 'agents.manage',         label: 'Add / remove agent presets',      group: 'Agents' },
+
   // Data
-  { key: 'data.import',           label: 'Import CSV',                      group: 'Data' },
-  { key: 'data.export',           label: 'Export CSV',                      group: 'Data' },
+  { key: 'data.import',           label: 'Import data (CSV / Excel)',       group: 'Data' },
+  { key: 'data.export',           label: 'Export data (CSV / Excel)',       group: 'Data' },
   { key: 'data.demo',             label: 'Load / Unload demo dataset',      group: 'Data' },
 
   // Filtering / search
   { key: 'view.filter',           label: 'Use filters and search',          group: 'View' },
   { key: 'view.quick_tabs',       label: 'Use quick-view tabs (All / Rent / Sale)', group: 'View' },
+
+  // Recycle bin
+  { key: 'recycle.access',        label: 'Open the Recycle Bin',            group: 'Recycle Bin' },
+  { key: 'recycle.restore',       label: 'Restore deleted items',           group: 'Recycle Bin' },
+  { key: 'recycle.purge',         label: 'Permanently delete from bin',     group: 'Recycle Bin' },
 ];
 
 export const PERMISSION_GROUPS = Array.from(new Set(PERMISSIONS.map((p) => p.group)));
@@ -66,8 +74,10 @@ const EDITOR_KEYS: string[] = [
   'folders.view_combined',
   'rows.create', 'rows.edit', 'rows.duplicate',
   'columns.create', 'columns.edit',
+  'agents.manage',
   'data.import', 'data.export',
   'view.filter', 'view.quick_tabs',
+  'recycle.access', 'recycle.restore',
 ];
 
 // Viewer: read-only — can only filter/search the data, no writes
@@ -146,7 +156,9 @@ function saveUserRoles(map: UserRoleMap): void {
 export function getUserRole(email: string): Role {
   const lower = email.toLowerCase();
   const map = loadUserRoles();
-  return map[lower] ?? 'admin';
+  // Default new signups to 'viewer' — the master admin can promote them later
+  // via Admin Control → User Setting.
+  return map[lower] ?? 'viewer';
 }
 
 export function setUserRole(email: string, role: Role): void {
@@ -158,4 +170,24 @@ export function setUserRole(email: string, role: Role): void {
 
 export function getAllUserRoles(): UserRoleMap {
   return loadUserRoles();
+}
+
+// ─── "View as" preview (master admin only) ─────────────────────────────────
+// Session-scoped — clears when the tab closes. Lets the master admin preview
+// the app exactly as each role would experience it, including the Prospect Hub
+// permission matrix configured in Admin Control.
+const VIEW_AS_KEY = 'we.view_as_role';
+
+export function getViewAsRole(): Role | null {
+  try {
+    const raw = sessionStorage.getItem(VIEW_AS_KEY);
+    if (!raw) return null;
+    return (ROLES.some((r) => r.id === raw) ? raw as Role : null);
+  } catch { return null; }
+}
+export function setViewAsRole(role: Role | null): void {
+  try {
+    if (role) sessionStorage.setItem(VIEW_AS_KEY, role);
+    else sessionStorage.removeItem(VIEW_AS_KEY);
+  } catch { /* ignore */ }
 }

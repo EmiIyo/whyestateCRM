@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { signOut as authSignOut, getCurrentUser, setNickname } from '@/lib/auth';
+import { signOut as authSignOut, getCurrentUser, setNickname, getAvatarColor, getAvatarImage, getUserTier } from '@/lib/auth';
 import { getUserRole, ROLES, type Role } from '@/lib/permissions';
 import {
   LayoutDashboard,
@@ -13,13 +13,9 @@ import {
   Menu,
   Shield,
   Settings,
-  FileText,
-  Home,
-  Users,
-  DollarSign,
   Calendar,
   Folder,
-  Camera,
+  Users,
   Pencil,
   Check as CheckIcon,
   X,
@@ -37,19 +33,13 @@ type NavDef = { label: string; icon: React.ElementType; path: string; badge: str
 const navItems: NavDef[] = [
   { label: 'Dashboard',     icon: LayoutDashboard, path: ROUTE_PATHS.DASHBOARD,     badge: null },
   { label: 'Prospect Hub',  icon: Target,          path: ROUTE_PATHS.LEADS,         badge: null },
-  { label: 'Deals',         icon: FileText,        path: ROUTE_PATHS.DEALS,         badge: null },
-  { label: 'Properties',    icon: Home,            path: ROUTE_PATHS.LISTINGS,      badge: null },
-  { label: 'Photo Studio',  icon: Camera,          path: ROUTE_PATHS.PHOTO_STUDIO,  badge: null },
-  { label: 'Clients',       icon: Users,           path: ROUTE_PATHS.CONTACTS,      badge: null },
-  { label: 'Commission',    icon: DollarSign,      path: ROUTE_PATHS.COMMISSION,    badge: null },
-  { label: 'Viewings',      icon: Calendar,        path: ROUTE_PATHS.CALENDAR,      badge: null },
+  { label: 'Clients',       icon: Users,           path: ROUTE_PATHS.CLIENTS,       badge: null },
+  { label: 'Calendar',      icon: Calendar,        path: ROUTE_PATHS.CALENDAR,      badge: null },
   { label: 'Documents',     icon: Folder,          path: ROUTE_PATHS.DOCUMENTS,     badge: null },
 ];
 
 // Routes restricted by role. Items not listed here are visible to everyone.
-const NAV_ROLE_GATES: Partial<Record<string, Role[]>> = {
-  [ROUTE_PATHS.PHOTO_STUDIO]: ['master_admin', 'admin', 'editor'],
-};
+const NAV_ROLE_GATES: Partial<Record<string, Role[]>> = {};
 
 // Admin Control is restricted to the master-admin account.
 const MASTER_ADMIN_EMAIL = 'linux@whyestate.com';
@@ -76,6 +66,22 @@ function roleLabel(role: Role): string {
 
 function roleTone(role: Role): { bg: string; text: string } {
   return ROLES.find((r) => r.id === role)?.tone ?? { bg: '#F3F4F6', text: '#374151' };
+}
+
+// Tier label = the job tier set in Admin Control → User Setting.
+// Falls back to the role label only if no email yet.
+function tierLabel(email: string | undefined): string {
+  if (!email) return roleLabel('viewer');
+  return getUserTier(email);
+}
+function tierTone(email: string | undefined): { bg: string; text: string } {
+  const t = email ? getUserTier(email) : 'Agent';
+  switch (t) {
+    case 'Agent':          return { bg: '#E0F2FE', text: '#0369A1' };
+    case 'Staff':          return { bg: '#F3F4F6', text: '#374151' };
+    case 'Branch Manager': return { bg: '#FEF3C7', text: '#92400E' };
+    case 'Branch Partner': return { bg: '#EDE9FE', text: '#7C3AED' };
+  }
 }
 
 // ─── Sidebar width states ─────────────────────────────────────────────────────
@@ -186,8 +192,7 @@ function UserCard({ collapsed }: { collapsed: boolean }) {
   const user = getCurrentUser();
   const userName = user?.name || 'LinuxLin';
   const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase();
-  const userRoleResolved = resolveRole(user?.email);
-  const USER_ROLE = roleLabel(userRoleResolved);
+  const USER_ROLE = tierLabel(user?.email);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(userName);
@@ -240,10 +245,12 @@ function UserCard({ collapsed }: { collapsed: boolean }) {
       {/* User identity (click name to edit nickname) */}
       <div className="flex items-center gap-2.5 px-1 py-2 group">
         <div
-          className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
-          style={{ background: '#1EC9C4' }}
+          className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden"
+          style={{ background: getAvatarColor() }}
         >
-          <span className="text-xs font-bold text-white">{userInitials}</span>
+          {getAvatarImage()
+            ? <img src={getAvatarImage() as string} alt="" className="w-full h-full object-cover" />
+            : <span className="text-xs font-bold text-white">{userInitials}</span>}
         </div>
         <div className="min-w-0 flex-1">
           {editing ? (
@@ -414,9 +421,8 @@ function TopBar({
   const me = getCurrentUser();
   const userName     = me?.name || 'User';
   const userEmail    = me?.email || '';
-  const userRoleId   = resolveRole(userEmail);
-  const userRoleLbl  = roleLabel(userRoleId);
-  const userRoleStyle = roleTone(userRoleId);
+  const userRoleLbl   = tierLabel(userEmail);
+  const userRoleStyle = tierTone(userEmail);
   const userInitials = userName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || 'U';
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -472,9 +478,11 @@ function TopBar({
           onClick={() => setMenuOpen((o) => !o)}
           className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl hover:bg-[#F5F7FA] transition-colors">
           <div
-            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ background: '#1EC9C4' }}>
-            <span className="text-xs font-bold text-white">{userInitials}</span>
+            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden"
+            style={{ background: getAvatarColor() }}>
+            {getAvatarImage()
+              ? <img src={getAvatarImage() as string} alt="" className="w-full h-full object-cover" />
+              : <span className="text-xs font-bold text-white">{userInitials}</span>}
           </div>
           <div className="hidden sm:block text-left">
             <p className="text-sm font-semibold leading-tight" style={{ color: '#4B4F55' }}>{userName}</p>
@@ -505,7 +513,7 @@ function TopBar({
             <button onClick={() => { setMenuOpen(false); navigate(ROUTE_PATHS.SETTINGS); }}
               className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-gray-50 transition-colors text-left"
               style={{ color: '#374151' }}>
-              <Settings size={13} className="text-gray-400" /> Settings
+              <Settings size={13} className="text-gray-400" /> My Profile
             </button>
             <div className="my-1 border-t border-gray-100" />
             <button onClick={() => { setMenuOpen(false); handleSignOut(); }}
