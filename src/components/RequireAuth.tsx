@@ -1,13 +1,7 @@
 import { Navigate } from 'react-router-dom';
-import { isAuthed, getCurrentUser } from '@/lib/auth';
-import { getUserRole, type Role } from '@/lib/permissions';
+import { useAuthStore } from '@/lib/auth';
+import { type Role } from '@/lib/permissions';
 import { ROUTE_PATHS } from '@/lib/index';
-
-const MASTER_ADMIN_EMAIL = 'linux@whyestate.com';
-
-function isMaster(email: string | undefined): boolean {
-  return (email ?? '').toLowerCase() === MASTER_ADMIN_EMAIL;
-}
 
 export default function RequireAuth({
   children,
@@ -18,20 +12,26 @@ export default function RequireAuth({
   masterOnly?: boolean;
   requireRoles?: Role[];
 }) {
-  if (!isAuthed()) return <Navigate to="/" replace />;
-  const me = getCurrentUser();
-  if (masterOnly) {
-    if (!isMaster(me?.email)) return <Navigate to={ROUTE_PATHS.LEADS} replace />;
+  const ready   = useAuthStore((s) => s.ready);
+  const user    = useAuthStore((s) => s.user);
+  const profile = useAuthStore((s) => s.profile);
+
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-sm text-gray-400">Loading…</div>
+      </div>
+    );
   }
-  if (requireRoles && requireRoles.length > 0) {
-    const role: Role = isMaster(me?.email)
-      ? 'master_admin'
-      : me?.email
-        ? getUserRole(me.email)
-        : 'viewer';
-    if (!requireRoles.includes(role)) {
-      return <Navigate to={ROUTE_PATHS.LEADS} replace />;
-    }
+  if (!user) return <Navigate to="/" replace />;
+
+  const role: Role = profile?.role ?? 'viewer';
+
+  if (masterOnly && role !== 'master_admin') {
+    return <Navigate to={ROUTE_PATHS.LEADS} replace />;
+  }
+  if (requireRoles && requireRoles.length > 0 && !requireRoles.includes(role)) {
+    return <Navigate to={ROUTE_PATHS.LEADS} replace />;
   }
   return <>{children}</>;
 }

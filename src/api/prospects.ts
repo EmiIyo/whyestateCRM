@@ -1,10 +1,10 @@
 import { supabase } from '@/lib/supabase';
 import type { Prospect, CallingStatus, ListingType, Furnishing, Availability } from '@/data/prospects';
-import type { Database } from '@/types/database';
+import type { Tables, TablesInsert, TablesUpdate } from '@/types/database';
 
-type DbProspect = Database['public']['Tables']['prospects']['Row'];
-type DbInsert   = Database['public']['Tables']['prospects']['Insert'];
-type DbUpdate   = Database['public']['Tables']['prospects']['Update'];
+type DbProspect = Tables<'prospects'>;
+type DbInsert   = TablesInsert<'prospects'>;
+type DbUpdate   = TablesUpdate<'prospects'>;
 
 // ─── Mappers ─────────────────────────────────────────────────────────────────
 function fromDb(r: DbProspect): Prospect {
@@ -53,6 +53,20 @@ export async function listProspectsByBoard(boardId: string): Promise<Prospect[]>
     .select('*')
     .eq('board_id', boardId)
     .order('position', { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map(fromDb);
+}
+
+// Paginated single-board reader. Use this for large boards (>200 rows).
+export async function listProspectsPage(boardId: string, opts: { from?: number; to?: number } = {}): Promise<Prospect[]> {
+  const from = opts.from ?? 0;
+  const to = opts.to ?? from + 99;
+  const { data, error } = await supabase
+    .from('prospects')
+    .select('*')
+    .eq('board_id', boardId)
+    .order('position', { ascending: true })
+    .range(from, to);
   if (error) throw error;
   return (data ?? []).map(fromDb);
 }
@@ -176,6 +190,11 @@ export async function importProspects(boardId: string, rows: Omit<Prospect, 'id'
     position:       startPos + i,
   }));
   if (inserts.length === 0) return;
-  const { error } = await supabase.from('prospects').insert(inserts);
-  if (error) throw error;
+  // Chunked insert to avoid request-size issues on bulk pastes (1k+ rows).
+  const CHUNK = 500;
+  for (let i = 0; i < inserts.length; i += CHUNK) {
+    const slice = inserts.slice(i, i + CHUNK);
+    const { error } = await supabase.from('prospects').insert(slice);
+    if (error) throw error;
+  }
 }

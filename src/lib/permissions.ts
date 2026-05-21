@@ -1,193 +1,137 @@
-// ─── Roles & Permissions for Prospect Hub ───────────────────────────────────
+// Supabase-backed permission helpers + role catalog.
+// The role matrix lives in `public.role_permissions`; it's pulled once at app
+// boot and kept in the zustand store. Components consume `canDo()` and the
+// store synchronously.
 
-export type Role = 'master_admin' | 'admin' | 'editor' | 'viewer';
+import { create } from 'zustand';
+import {
+  loadRolePerms,
+  saveRolePerms as apiSaveRolePerms,
+  ROLES,
+  PERMISSIONS,
+  PERMISSION_GROUPS,
+  type RolePerms,
+  type AppRole,
+  type PermissionDef,
+} from '@/api/permissions';
+import { useAuthStore } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
+import { adminSetUserRole as apiSetRole } from '@/api/profiles';
 
-export const ROLES: { id: Role; label: string; locked: boolean; tone: { bg: string; text: string } }[] = [
-  { id: 'master_admin', label: 'Master Admin', locked: true,  tone: { bg: '#FEF3C7', text: '#92400E' } },
-  { id: 'admin',        label: 'Admin',        locked: false, tone: { bg: '#DAF3F2', text: '#0F766E' } },
-  { id: 'editor',       label: 'Editor',       locked: false, tone: { bg: '#E0F2FE', text: '#0369A1' } },
-  { id: 'viewer',       label: 'Viewer',       locked: false, tone: { bg: '#F3F4F6', text: '#374151' } },
-];
+export { ROLES, PERMISSIONS, PERMISSION_GROUPS };
+export type { RolePerms, AppRole as Role, PermissionDef };
 
-export interface PermissionDef {
-  key:   string;
-  label: string;
-  group: string;
+// ─── Store ───────────────────────────────────────────────────────────────
+interface PermsState {
+  perms: RolePerms;
+  loaded: boolean;
+  setPerms: (p: RolePerms) => void;
 }
 
-// Each permission corresponds to a clickable action / control inside Prospect Hub.
-export const PERMISSIONS: PermissionDef[] = [
-  // Boards
-  { key: 'boards.create',         label: 'Create new board',                group: 'Boards' },
-  { key: 'boards.edit',           label: 'Edit board settings',             group: 'Boards' },
-  { key: 'boards.delete',         label: 'Delete board (and its data)',     group: 'Boards' },
-  { key: 'boards.reorder',        label: 'Rearrange boards (Manage mode)',  group: 'Boards' },
-  { key: 'boards.invite_members', label: 'Invite members to a board',       group: 'Boards' },
-  { key: 'boards.remove_members', label: 'Remove members from a board',     group: 'Boards' },
+export const usePermsStore = create<PermsState>((set) => ({
+  perms: { master_admin: [], admin: [], editor: [], viewer: [] },
+  loaded: false,
+  setPerms: (perms) => set({ perms, loaded: true }),
+}));
 
-  // Folders
-  { key: 'folders.create',         label: 'Create folder',                   group: 'Folders' },
-  { key: 'folders.edit',           label: 'Rename folder',                   group: 'Folders' },
-  { key: 'folders.delete',         label: 'Delete folder',                   group: 'Folders' },
-  { key: 'folders.assign_boards',  label: 'Move boards into folders',        group: 'Folders' },
-  { key: 'folders.view_combined',  label: 'Open combined folder view',       group: 'Folders' },
-  { key: 'folders.invite_members', label: 'Invite members to a folder',      group: 'Folders' },
-  { key: 'folders.remove_members', label: 'Remove members from a folder',    group: 'Folders' },
-
-  // Prospect rows (data)
-  { key: 'rows.create',           label: 'Add new prospect row',            group: 'Prospects' },
-  { key: 'rows.edit',             label: 'Edit cell values',                group: 'Prospects' },
-  { key: 'rows.delete',           label: 'Delete prospect row',             group: 'Prospects' },
-  { key: 'rows.duplicate',        label: 'Duplicate prospect row',          group: 'Prospects' },
-  { key: 'rows.bulk_delete',      label: 'Bulk delete (multi-select)',      group: 'Prospects' },
-
-  // Columns (custom fields)
-  { key: 'columns.create',        label: 'Add custom column',               group: 'Columns' },
-  { key: 'columns.edit',          label: 'Rename column',                   group: 'Columns' },
-  { key: 'columns.delete',        label: 'Delete column',                   group: 'Columns' },
-
-  // Agents (shared preset list in the Agent column dropdown)
-  { key: 'agents.manage',         label: 'Add / remove agent presets',      group: 'Agents' },
-
-  // Data
-  { key: 'data.import',           label: 'Import data (CSV / Excel)',       group: 'Data' },
-  { key: 'data.export',           label: 'Export data (CSV / Excel)',       group: 'Data' },
-  { key: 'data.demo',             label: 'Load / Unload demo dataset',      group: 'Data' },
-
-  // Filtering / search
-  { key: 'view.filter',           label: 'Use filters and search',          group: 'View' },
-  { key: 'view.quick_tabs',       label: 'Use quick-view tabs (All / Rent / Sale)', group: 'View' },
-
-  // Recycle bin
-  { key: 'recycle.access',        label: 'Open the Recycle Bin',            group: 'Recycle Bin' },
-  { key: 'recycle.restore',       label: 'Restore deleted items',           group: 'Recycle Bin' },
-  { key: 'recycle.purge',         label: 'Permanently delete from bin',     group: 'Recycle Bin' },
-];
-
-export const PERMISSION_GROUPS = Array.from(new Set(PERMISSIONS.map((p) => p.group)));
-
-// ─── Default role → permissions mapping ─────────────────────────────────────
-const ALL_KEYS = PERMISSIONS.map((p) => p.key);
-
-// Keys an editor can do (can edit row/column data but not delete boards/folders/columns)
-const EDITOR_KEYS: string[] = [
-  'folders.view_combined',
-  'rows.create', 'rows.edit', 'rows.duplicate',
-  'columns.create', 'columns.edit',
-  'agents.manage',
-  'data.import', 'data.export',
-  'view.filter', 'view.quick_tabs',
-  'recycle.access', 'recycle.restore',
-];
-
-// Viewer: read-only — can only filter/search the data, no writes
-const VIEWER_KEYS: string[] = [
-  'folders.view_combined',
-  'data.export',
-  'view.filter', 'view.quick_tabs',
-];
-
-const DEFAULTS: Record<Role, string[]> = {
-  master_admin: ALL_KEYS,
-  admin:        ALL_KEYS,            // by default same as master, locked-master can change this
-  editor:       EDITOR_KEYS,
-  viewer:       VIEWER_KEYS,
-};
-
-// ─── Persistence ────────────────────────────────────────────────────────────
-const KEY = 'we.roles';
-
-export type RolePerms = Record<Role, string[]>;
-
-export function loadRolePerms(): RolePerms {
+// ─── Boot ─────────────────────────────────────────────────────────────────
+let booted = false;
+export async function bootPermissions(): Promise<void> {
+  if (booted) return;
+  booted = true;
   try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<RolePerms>;
-      // Merge with defaults so newly added permissions get a sane fallback.
-      return {
-        master_admin: ALL_KEYS, // always all
-        admin:  parsed.admin  ?? DEFAULTS.admin,
-        editor: parsed.editor ?? DEFAULTS.editor,
-        viewer: parsed.viewer ?? DEFAULTS.viewer,
-      };
-    }
-  } catch { /* ignore */ }
-  return { ...DEFAULTS };
+    const perms = await loadRolePerms();
+    usePermsStore.getState().setPerms(perms);
+  } catch {
+    // Anonymous bootstrap — leave defaults; will reload after sign-in.
+  }
 }
 
-export function saveRolePerms(perms: RolePerms): void {
-  try {
-    // Don't bother persisting the master_admin column — it's always all.
-    const { master_admin: _drop, ...rest } = perms;
-    localStorage.setItem(KEY, JSON.stringify(rest));
-  } catch { /* ignore */ }
+export async function refreshPermissions(): Promise<void> {
+  const perms = await loadRolePerms();
+  usePermsStore.getState().setPerms(perms);
 }
 
-export function resetRolePerms(): void {
-  localStorage.removeItem(KEY);
-}
-
-// ─── Runtime permission check ──────────────────────────────────────────────
-export function canDo(role: Role, permission: string): boolean {
+// ─── Synchronous read helpers ────────────────────────────────────────────
+export function canDo(role: AppRole, permission: string): boolean {
   if (role === 'master_admin') return true;
-  const perms = loadRolePerms();
+  const perms = usePermsStore.getState().perms;
   return (perms[role] ?? []).includes(permission);
 }
 
-// ─── User → role assignment ────────────────────────────────────────────────
-const USER_ROLES_KEY = 'we.user_roles';
-
-type UserRoleMap = Record<string, Role>;
-
-function loadUserRoles(): UserRoleMap {
-  try {
-    const raw = localStorage.getItem(USER_ROLES_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return (parsed && typeof parsed === 'object') ? parsed as UserRoleMap : {};
-  } catch { return {}; }
+export function getCurrentRole(): AppRole {
+  return useAuthStore.getState().profile?.role ?? 'viewer';
 }
 
-function saveUserRoles(map: UserRoleMap): void {
-  try { localStorage.setItem(USER_ROLES_KEY, JSON.stringify(map)); } catch { /* ignore */ }
+export function canCurrentUser(permission: string): boolean {
+  return canDo(getViewAsRole() ?? getCurrentRole(), permission);
 }
 
-export function getUserRole(email: string): Role {
-  const lower = email.toLowerCase();
-  const map = loadUserRoles();
-  // Default new signups to 'viewer' — the master admin can promote them later
-  // via Admin Control → User Setting.
-  return map[lower] ?? 'viewer';
+// ─── Mutations ───────────────────────────────────────────────────────────
+export async function saveRolePerms(perms: RolePerms): Promise<void> {
+  // Master admin row is immutable server-side; loop the three editable roles.
+  await Promise.all([
+    apiSaveRolePerms('admin',  perms.admin),
+    apiSaveRolePerms('editor', perms.editor),
+    apiSaveRolePerms('viewer', perms.viewer),
+  ]);
+  usePermsStore.getState().setPerms(perms);
 }
 
-export function setUserRole(email: string, role: Role): void {
-  const lower = email.toLowerCase();
-  const map = loadUserRoles();
-  map[lower] = role;
-  saveUserRoles(map);
+export async function resetRolePerms(): Promise<void> {
+  await refreshPermissions();
 }
 
-export function getAllUserRoles(): UserRoleMap {
-  return loadUserRoles();
+// ─── User ↔ role assignment ─────────────────────────────────────────────
+export function getUserRole(email: string): AppRole {
+  const dir = useAuthStore.getState().directory;
+  const row = dir.find((p) => p.email.toLowerCase() === email.toLowerCase());
+  return row?.role ?? 'viewer';
 }
 
-// ─── "View as" preview (master admin only) ─────────────────────────────────
-// Session-scoped — clears when the tab closes. Lets the master admin preview
-// the app exactly as each role would experience it, including the Prospect Hub
-// permission matrix configured in Admin Control.
+export function getAllUserRoles(): Record<string, AppRole> {
+  const dir = useAuthStore.getState().directory;
+  const out: Record<string, AppRole> = {};
+  for (const p of dir) out[p.email.toLowerCase()] = p.role;
+  return out;
+}
+
+export async function setUserRole(email: string, role: AppRole): Promise<void> {
+  const dir = useAuthStore.getState().directory;
+  const row = dir.find((p) => p.email.toLowerCase() === email.toLowerCase());
+  if (!row) throw new Error('User not found');
+  await apiSetRole(row.id, role);
+  // Update local directory optimistically.
+  const next = dir.map((p) => p.id === row.id ? { ...p, role } : p);
+  useAuthStore.getState().setDirectory(next);
+}
+
+// ─── "View as" preview (master admin only) ──────────────────────────────
 const VIEW_AS_KEY = 'we.view_as_role';
 
-export function getViewAsRole(): Role | null {
+export function getViewAsRole(): AppRole | null {
   try {
     const raw = sessionStorage.getItem(VIEW_AS_KEY);
     if (!raw) return null;
-    return (ROLES.some((r) => r.id === raw) ? raw as Role : null);
+    return (ROLES.some((r) => r.id === raw) ? raw as AppRole : null);
   } catch { return null; }
 }
-export function setViewAsRole(role: Role | null): void {
+export function setViewAsRole(role: AppRole | null): void {
   try {
     if (role) sessionStorage.setItem(VIEW_AS_KEY, role);
     else sessionStorage.removeItem(VIEW_AS_KEY);
   } catch { /* ignore */ }
+}
+
+// ─── Realtime subscription (so admin matrix edits propagate live) ───────
+let realtimeSubscribed = false;
+export function subscribePermissionsRealtime(): void {
+  if (realtimeSubscribed) return;
+  realtimeSubscribed = true;
+  supabase
+    .channel('role_permissions')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'role_permissions' }, () => {
+      void refreshPermissions();
+    })
+    .subscribe();
 }

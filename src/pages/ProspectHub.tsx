@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import * as SliderPrimitive from '@radix-ui/react-slider';
 import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage, getUserTier } from '@/lib/auth';
-import { importFromProspect, listClients } from '@/lib/clients';
+import { importFromProspect, listClients, type Client } from '@/api/clients';
 
 // Tier display tones — mirror Admin Control's TIER_TONES so badges match
 // across User Setting, sidebar, topbar, and member lists.
@@ -89,7 +89,7 @@ function loadCrmState(): CrmState | null {
   } catch { return null; }
 }
 function saveCrmState(state: CrmState): void {
-  try { localStorage.setItem(CRM_STORAGE_KEY, JSON.stringify(state)); } catch {}
+  try { localStorage.setItem(CRM_STORAGE_KEY, JSON.stringify(state)); } catch { /* quota exceeded — silently drop */ }
 }
 
 // ─── Demo data generator (50 boards × 300 prospects) ────────────────────────
@@ -4046,40 +4046,35 @@ export default function ProspectHub() {
 
   // ── Import to Clients module ─────────────────────────────────────────────
   // Snapshots a prospect row into the Clients module so it can carry follow-up
-  // state and tasks. Idempotent on prospectId — re-importing refreshes the
-  // snapshot fields and bumps the timestamp.
-  const [importedTick, setImportedTick] = useState(0);
-  const importedProspectIds = useMemo(() => {
-    void importedTick; // bust when import happens
-    return new Set(listClients().map((c) => c.prospectId).filter(Boolean) as string[]);
-  }, [importedTick]);
+  // state and tasks. Idempotent on prospectId — the server-side RPC refreshes
+  // snapshot fields when re-imported.
+  const [importedClients, setImportedClients] = useState<Client[]>([]);
+  const importedProspectIds = useMemo(
+    () => new Set(importedClients.map((c) => c.prospectId).filter(Boolean) as string[]),
+    [importedClients],
+  );
+  useEffect(() => { listClients().then(setImportedClients).catch(() => {}); }, []);
+
   const [importToast, setImportToast] = useState<{ name: string; created: boolean } | null>(null);
 
-  const importRowAsClient = (id: string) => {
+  const importRowAsClient = async (id: string) => {
     const src = rows.find((r) => r.id === id);
     if (!src) return;
-    // Resolve the source board name from whichever view we're in.
-    const boardName = activeBoard?.name ?? prospectToBoard.get(id)?.name ?? '';
-    const { client, created } = importFromProspect({
-      prospectId:    src.id,
-      name:          src.name,
-      phone:         src.phone,
-      unitNo:        src.unitNo,
-      boardName,
-      listingType:   src.listingType,
-      askingRent:    src.askingRent,
-      askingPrice:   src.askingPrice,
-      callingStatus: src.callingStatus,
-      remark:        src.remark,
-      agent:         src.agent,
-    }, OWNER_EMAIL);
-    setImportedTick((t) => t + 1);
-    setImportToast({ name: client.name, created });
+    try {
+      const wasImported = importedProspectIds.has(src.id);
+      const client = await importFromProspect(src.id);
+      const fresh = await listClients();
+      setImportedClients(fresh);
+      setImportToast({ name: client.name, created: !wasImported });
+    } catch (err) {
+      console.error('importFromProspect failed', err);
+      setImportToast({ name: src.name || 'client', created: false });
+    }
     setRowMenu(null);
     setTimeout(() => setImportToast(null), 2800);
   };
 
-  const toggleRow   = (id: string) => setSelectedRows((p) => { const s = new Set(p); s.has(id) ? s.delete(id) : s.add(id); return s; });
+  const toggleRow   = (id: string) => setSelectedRows((p) => { const s = new Set(p); if (s.has(id)) s.delete(id); else s.add(id); return s; });
   const toggleAll   = () => setSelectedRows(selectedRows.size === filtered.length ? new Set() : new Set(filtered.map((r) => r.id)));
 
   // ── Fill-handle: drag starts on the handle dot ────────────────────────────

@@ -13,9 +13,13 @@ import _generate from '@babel/generator';
 import * as t from '@babel/types';
 
 
-// CJS/ESM interop for Babel libs
-const traverse: typeof _traverse.default = ( (_traverse as any).default ?? _traverse ) as any;
-const generate: typeof _generate.default = ( (_generate as any).default ?? _generate ) as any;
+// CJS/ESM interop for Babel libs — types ship as the function itself; at
+// runtime the ESM bundle exposes a `.default`. Cast to `any` so both shapes
+// resolve.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const traverse: any = ((_traverse as any).default ?? _traverse);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const generate: any = ((_generate as any).default ?? _generate);
 
 function cdnPrefixImages(): Plugin {
   const DEBUG = process.env.CDN_IMG_DEBUG === '1';
@@ -80,7 +84,7 @@ function cdnPrefixImages(): Plugin {
     let rewrites = 0;
 
     traverse(ast, {
-      JSXAttribute(path) {
+      JSXAttribute(path: any) {
         const name = (path.node.name as t.JSXIdentifier).name;
         const isSrc = name === 'src' || name === 'href';
         const isSrcSet = name === 'srcSet' || name === 'srcset';
@@ -104,23 +108,23 @@ function cdnPrefixImages(): Plugin {
         }
       },
 
-      StringLiteral(path) {
+      StringLiteral(path: any) {
         // skip object keys: { "image": "..." }
         if (t.isObjectProperty(path.parent) && path.parentKey === 'key' && !path.parent.computed) return;
         // skip import/export sources
         if (t.isImportDeclaration(path.parent) || t.isExportAllDeclaration(path.parent) || t.isExportNamedDeclaration(path.parent)) return;
         // skip inside JSX attribute (already handled)
-        if (path.findParent(p => p.isJSXAttribute())) return;
+        if (path.findParent((p: any) => p.isJSXAttribute())) return;
 
         const before = path.node.value;
         const after = toCDN(before, cdn);
         if (after !== before) { path.node.value = after; rewrites++; }
       },
 
-      TemplateLiteral(path) {
+      TemplateLiteral(path: any) {
         // handle `"/images/foo.png"` as template with NO expressions
         if (path.node.expressions.length) return;
-        const raw = path.node.quasis.map(q => q.value.cooked ?? q.value.raw).join('');
+        const raw = path.node.quasis.map((q: any) => q.value.cooked ?? q.value.raw).join('');
         const after = toCDN(raw, cdn);
         if (after !== raw) {
           path.replaceWith(t.stringLiteral(after));

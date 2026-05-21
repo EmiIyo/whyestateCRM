@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   Plus, Search, X, Trash2, Check, MapPin,
   Calendar as CalendarIcon, ChevronDown, Users, AlertTriangle, Sparkles,
@@ -10,16 +10,13 @@ import {
   isOverdue, isToday, isUpcoming, fmtDate,
   CLIENT_TYPES, CLIENT_STAGES, STAGE_TONES, TYPE_TONES, PRIORITY_TONES,
   type Client, type ClientStage, type ClientType, type ClientTask, type TaskPriority,
-} from '@/lib/clients';
-import { getCurrentUser } from '@/lib/auth';
+} from '@/api/clients';
+import { supabase } from '@/lib/supabase';
 
 type ViewMode = 'tasks' | 'kanban' | 'list';
 
 export default function ClientsPage() {
-  const me = getCurrentUser();
-  const myEmail = me?.email ?? '';
-
-  const [tick, setTick]       = useState(0);
+  const [clients, setClients] = useState<Client[]>([]);
   const [view, setView]       = useState<ViewMode>('tasks');
   const [query, setQuery]     = useState('');
   const [typeFilter, setTypeFilter]   = useState<ClientType | 'All'>('All');
@@ -27,8 +24,28 @@ export default function ClientsPage() {
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Client | null>(null);
 
-  const clients = useMemo(() => listClients(), [tick]);
-  const refresh = () => setTick((t) => t + 1);
+  const refresh = useCallback(async () => {
+    try { setClients(await listClients()); }
+    catch (e) { console.error('listClients failed', e); }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // Realtime: re-fetch when anyone in the workspace mutates clients or tasks.
+  useEffect(() => {
+    const ch = supabase.channel('clients-page')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' },      () => void refresh())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'client_tasks' }, () => void refresh())
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [refresh]);
+
+  // Keep the open `editing` modal in sync with refreshed data.
+  useEffect(() => {
+    if (!editing) return;
+    const fresh = clients.find((c) => c.id === editing.id);
+    if (fresh && fresh !== editing) setEditing(fresh);
+  }, [clients, editing]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -151,20 +168,20 @@ export default function ClientsPage() {
             today={todayItems}
             upcoming={upcomingItems}
             onOpenClient={(c) => setEditing(c)}
-            onToggleTask={(cid, tid) => { toggleTask(cid, tid); refresh(); }}
+            onToggleTask={async (taskId, currentDone) => { await toggleTask(taskId, !currentDone); await refresh(); }}
           />
         ) : view === 'kanban' ? (
           <KanbanBoard
             clients={filtered}
             onOpenClient={(c) => setEditing(c)}
-            onStageChange={(c, stage) => { updateClient(c.id, { stage }); refresh(); }}
+            onStageChange={async (c, stage) => { await updateClient(c.id, { stage }); await refresh(); }}
           />
         ) : (
           <ListView
             clients={filtered}
             onOpenClient={(c) => setEditing(c)}
             onDelete={(c) => setConfirmDelete(c)}
-            onConvert={(c) => { convertToListing(c.id); refresh(); }}
+            onConvert={async (c) => { await convertToListing(c.id); await refresh(); }}
           />
         )}
       </div>
@@ -174,42 +191,40 @@ export default function ClientsPage() {
         <ClientModal
           client={editing}
           onClose={() => { setCreating(false); setEditing(null); }}
-          onSave={(patch) => {
-            if (editing) updateClient(editing.id, patch);
-            else createClient({
-              name: patch.name ?? '', phone: patch.phone ?? '', email: patch.email ?? '',
-              type: patch.type ?? 'Lead', stage: patch.stage ?? 'New', source: 'manual',
-              propertyInterest: patch.propertyInterest ?? '', budget: patch.budget ?? '',
-              lastContact: patch.lastContact ?? '', nextFollowUp: patch.nextFollowUp ?? '',
-              notes: patch.notes ?? '', ownerEmail: myEmail,
-            });
-            setCreating(false); setEditing(null); refresh();
+          onSave={async (patch) => {
+            try {
+              if (editing) await updateClient(editing.id, patch);
+              else await createClient({
+                name: patch.name ?? '', phone: patch.phone ?? '', email: patch.email ?? '',
+                type: patch.type ?? 'Lead', stage: patch.stage ?? 'New', source: 'manual',
+                propertyInterest: patch.propertyInterest ?? '', budget: patch.budget ?? '',
+                lastContact: patch.lastContact ?? '', nextFollowUp: patch.nextFollowUp ?? '',
+                notes: patch.notes ?? '',
+              });
+              setCreating(false); setEditing(null); await refresh();
+            } catch (e) { console.error('save client failed', e); }
           }}
-          onAddTask={(title, due, prio) => {
+          onAddTask={async (title, due, prio) => {
             if (!editing) return;
-            addTask(editing.id, title, due, prio);
-            const fresh = listClients().find((x) => x.id === editing.id) ?? null;
-            setEditing(fresh);
-            refresh();
+            try { await addTask(editing.id, title, due, prio); await refresh(); }
+            catch (e) { console.error('addTask failed', e); }
           }}
-          onToggleTask={(taskId) => {
+          onToggleTask={async (taskId) => {
             if (!editing) return;
-            toggleTask(editing.id, taskId);
-            const fresh = listClients().find((x) => x.id === editing.id) ?? null;
-            setEditing(fresh);
-            refresh();
+            const t = editing.tasks.find((x) => x.id === taskId);
+            if (!t) return;
+            try { await toggleTask(taskId, !t.done); await refresh(); }
+            catch (e) { console.error('toggleTask failed', e); }
           }}
-          onDeleteTask={(taskId) => {
+          onDeleteTask={async (taskId) => {
             if (!editing) return;
-            deleteTask(editing.id, taskId);
-            const fresh = listClients().find((x) => x.id === editing.id) ?? null;
-            setEditing(fresh);
-            refresh();
+            try { await deleteTask(taskId); await refresh(); }
+            catch (e) { console.error('deleteTask failed', e); }
           }}
-          onConvert={() => {
+          onConvert={async () => {
             if (!editing) return;
-            convertToListing(editing.id);
-            setEditing(null); refresh();
+            try { await convertToListing(editing.id); setEditing(null); await refresh(); }
+            catch (e) { console.error('convert failed', e); }
           }}
           onDelete={() => {
             if (!editing) return;
@@ -222,7 +237,10 @@ export default function ClientsPage() {
         <ConfirmDeleteModal
           name={confirmDelete.name}
           onCancel={() => setConfirmDelete(null)}
-          onConfirm={() => { deleteClient(confirmDelete.id); setConfirmDelete(null); refresh(); }}
+          onConfirm={async () => {
+            try { await deleteClient(confirmDelete.id); setConfirmDelete(null); await refresh(); }
+            catch (e) { console.error('deleteClient failed', e); }
+          }}
         />
       )}
     </div>
@@ -277,7 +295,7 @@ function TaskFeed({ overdue, today, upcoming, onOpenClient, onToggleTask }: {
   today:    Array<{ kind: 'task'; client: Client; task: ClientTask } | { kind: 'follow'; client: Client; date: string }>;
   upcoming: Array<{ kind: 'task'; client: Client; task: ClientTask } | { kind: 'follow'; client: Client; date: string }>;
   onOpenClient: (c: Client) => void;
-  onToggleTask: (clientId: string, taskId: string) => void;
+  onToggleTask: (taskId: string, currentDone: boolean) => void;
 }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -298,7 +316,7 @@ function TaskColumn({ title, count, items, toneText, dot, onOpenClient, onToggle
   toneText: string;
   dot: string;
   onOpenClient: (c: Client) => void;
-  onToggleTask: (clientId: string, taskId: string) => void;
+  onToggleTask: (taskId: string, currentDone: boolean) => void;
   emptyHint: string;
 }) {
   // Sort by date asc, with empty dates last
@@ -337,7 +355,7 @@ function TaskColumn({ title, count, items, toneText, dot, onOpenClient, onToggle
 function TaskCard({ item, onOpenClient, onToggleTask }: {
   item: { kind: 'task'; client: Client; task: ClientTask } | { kind: 'follow'; client: Client; date: string };
   onOpenClient: (c: Client) => void;
-  onToggleTask: (clientId: string, taskId: string) => void;
+  onToggleTask: (taskId: string, currentDone: boolean) => void;
 }) {
   const date = item.kind === 'task' ? item.task.dueDate : item.date;
   const title = item.kind === 'task' ? item.task.title : 'Follow up';
@@ -349,7 +367,7 @@ function TaskCard({ item, onOpenClient, onToggleTask }: {
       onClick={() => onOpenClient(item.client)}>
       <div className="flex items-start gap-2">
         {item.kind === 'task' ? (
-          <button onClick={(e) => { e.stopPropagation(); onToggleTask(item.client.id, item.task.id); }}
+          <button onClick={(e) => { e.stopPropagation(); onToggleTask(item.task.id, item.task.done); }}
             className="mt-0.5 w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 hover:border-[#1EC9C4]"
             style={{ borderColor: '#D1D5DB' }}>
             {item.task.done && <Check size={11} className="text-[#1EC9C4]" strokeWidth={3} />}

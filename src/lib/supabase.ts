@@ -8,4 +8,18 @@ if (!url || !key) {
   throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY in .env');
 }
 
-export const supabase = createClient<Database>(url, key);
+export const supabase = createClient<Database>(url, key, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    storageKey: 'we.auth',
+    flowType: 'pkce',
+  },
+  global: {
+    headers: { 'x-application-name': 'why-estate-crm' },
+  },
+  realtime: {
+    params: { eventsPerSecond: 5 },
+  },
+});

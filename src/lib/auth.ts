@@ -1,347 +1,217 @@
-// Lightweight client-side auth state — backed by localStorage.
-// Easy to swap for Supabase Auth later by replacing the bodies of these helpers.
+// Supabase-backed auth & profile store.
+// All UI components consume this module synchronously (via the zustand store)
+// — async writes to Supabase are fire-and-forget with optimistic local updates.
 
-const KEY_AUTH      = 'we.authed';
-const KEY_EMAIL     = 'we.email';
-const KEY_NAME      = 'we.name';
-const KEY_COLOR     = 'we.avatar_color';  // per-user picked avatar hex (falls back to teal)
-const KEY_USERS     = 'we.users';   // directory of every account that has signed up on this browser
-const KEY_PASSWORDS = 'we.passwords';  // { [emailLower]: sha256Hex } — local mock auth only
+import { create } from 'zustand';
+import { supabase } from '@/lib/supabase';
+import {
+  getProfile,
+  listProfiles,
+  updateMyProfile,
+  type Profile,
+  type UserTier,
+  USER_TIERS,
+} from '@/api/profiles';
+
+export { USER_TIERS };
+export type { UserTier };
 
 export interface AuthUser {
   email: string;
   name: string;
+  id: string;
 }
 
 export interface DirectoryUser {
   email:     string;
   name:      string;
-  firstSeen: string;   // ISO timestamp
-  lastSeen:  string;   // ISO timestamp
+  firstSeen: string;
+  lastSeen:  string;
 }
 
-export function listAllUsers(): DirectoryUser[] {
-  if (typeof window === 'undefined') return [];
+export const DEFAULT_AVATAR_COLOR = '#1EC9C4';
+
+// ─── Zustand store ─────────────────────────────────────────────────────────
+interface AuthState {
+  ready:     boolean;             // initial session hydration done
+  user:      AuthUser | null;
+  profile:   Profile | null;
+  directory: Profile[];           // every profile in the workspace
+  setSession: (user: AuthUser | null, profile: Profile | null) => void;
+  setDirectory: (rows: Profile[]) => void;
+  setProfile: (p: Profile | null) => void;
+  setReady: (v: boolean) => void;
+}
+
+export const useAuthStore = create<AuthState>((set) => ({
+  ready: false,
+  user: null,
+  profile: null,
+  directory: [],
+  setSession: (user, profile) => set({ user, profile }),
+  setDirectory: (rows) => set({ directory: rows }),
+  setProfile: (profile) => set((s) => ({
+    profile,
+    user: profile && s.user
+      ? { ...s.user, name: profile.display_name || s.user.email.split('@')[0] }
+      : s.user,
+  })),
+  setReady: (ready) => set({ ready }),
+}));
+
+// ─── Boot: hydrate session + listen for auth changes ──────────────────────
+let booted = false;
+export async function bootAuth(): Promise<void> {
+  if (booted) return;
+  booted = true;
+
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.user) {
+    const profile = await getProfile(session.user.id);
+    useAuthStore.getState().setSession(
+      { id: session.user.id, email: session.user.email ?? '', name: profile?.display_name || (session.user.email?.split('@')[0] ?? '') },
+      profile,
+    );
+    void refreshDirectory();
+  }
+  useAuthStore.getState().setReady(true);
+
+  supabase.auth.onAuthStateChange(async (_evt, sess) => {
+    if (!sess?.user) {
+      useAuthStore.getState().setSession(null, null);
+      useAuthStore.getState().setDirectory([]);
+      return;
+    }
+    const profile = await getProfile(sess.user.id);
+    useAuthStore.getState().setSession(
+      { id: sess.user.id, email: sess.user.email ?? '', name: profile?.display_name || (sess.user.email?.split('@')[0] ?? '') },
+      profile,
+    );
+    void refreshDirectory();
+  });
+}
+
+export async function refreshDirectory(): Promise<void> {
   try {
-    const raw = localStorage.getItem(KEY_USERS);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+    const rows = await listProfiles();
+    useAuthStore.getState().setDirectory(rows);
+  } catch { /* swallow — usually means not signed-in yet */ }
 }
 
-function saveAllUsers(users: DirectoryUser[]): void {
-  try { localStorage.setItem(KEY_USERS, JSON.stringify(users)); } catch { /* ignore */ }
-}
-
-function recordSignIn(email: string, name: string): void {
-  const now = new Date().toISOString();
-  const lower = email.toLowerCase();
-  const users = listAllUsers();
-  const idx = users.findIndex((u) => u.email.toLowerCase() === lower);
-  if (idx >= 0) {
-    // Keep the existing directory name when the incoming one is just the
-    // email prefix — protects against a generic "linux" overwriting a
-    // user-edited "Linux Lin" on sign-in.
-    const existing = users[idx].name ?? '';
-    const incoming = name ?? '';
-    const emailPrefix = email.split('@')[0];
-    const nextName =
-      (!incoming || incoming === emailPrefix) && existing
-        ? existing
-        : incoming || existing;
-    users[idx] = { ...users[idx], name: nextName, lastSeen: now };
-  } else {
-    users.push({ email, name, firstSeen: now, lastSeen: now });
-  }
-  saveAllUsers(users);
-}
-
-export function removeUserFromDirectory(email: string): void {
-  const lower = email.toLowerCase();
-  const next = listAllUsers().filter((u) => u.email.toLowerCase() !== lower);
-  saveAllUsers(next);
-}
-
-// Update any user's display name in the directory (admin-side rename).
-// Also retroactively rewrites the prospect `agent` field anywhere it matched
-// the old name, and if the renamed user is the currently-signed-in one, syncs
-// `we.name` so the sidebar refreshes on reload.
-export function setUserName(email: string, newName: string): boolean {
-  const trimmed = newName.trim();
-  if (!trimmed) return false;
-  const lower = email.toLowerCase();
-  const users = listAllUsers();
-  const idx = users.findIndex((u) => u.email.toLowerCase() === lower);
-  if (idx < 0) return false;
-  const oldName = users[idx].name;
-  if (oldName === trimmed) return false;
-  users[idx] = { ...users[idx], name: trimmed };
-  saveAllUsers(users);
-
-  // If editing the currently-signed-in user, keep KEY_NAME in sync.
-  const myEmail = localStorage.getItem(KEY_EMAIL);
-  if (myEmail && myEmail.toLowerCase() === lower) {
-    localStorage.setItem(KEY_NAME, trimmed);
-  }
-
-  // Retroactively rewrite the agent field on any prospect that matched the old name.
-  if (oldName) {
-    try {
-      const raw = localStorage.getItem('we.crm.state');
-      if (raw) {
-        const state = JSON.parse(raw) as { prospects?: Record<string, Array<{ agent?: string }>> };
-        if (state.prospects) {
-          for (const boardId of Object.keys(state.prospects)) {
-            for (const p of state.prospects[boardId]) {
-              if (p.agent === oldName) p.agent = trimmed;
-            }
-          }
-          localStorage.setItem('we.crm.state', JSON.stringify(state));
-        }
-      }
-    } catch { /* ignore */ }
-  }
-  return true;
-}
-
-// ─── Tier (per-user job tier — separate from permission/role) ───────────────
-export const USER_TIERS = ['Agent', 'Staff', 'Branch Manager', 'Branch Partner'] as const;
-export type UserTier = typeof USER_TIERS[number];
-const KEY_USER_TIERS = 'we.user_tiers';
-
-function loadTiers(): Record<string, UserTier> {
-  try {
-    const raw = localStorage.getItem(KEY_USER_TIERS);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return (parsed && typeof parsed === 'object') ? parsed as Record<string, UserTier> : {};
-  } catch { return {}; }
-}
-function saveTiers(map: Record<string, UserTier>): void {
-  try { localStorage.setItem(KEY_USER_TIERS, JSON.stringify(map)); } catch { /* ignore */ }
-}
-export function getUserTier(email: string): UserTier {
-  if (typeof window === 'undefined') return 'Agent';
-  return loadTiers()[email.toLowerCase()] ?? 'Agent';
-}
-export function setUserTier(email: string, tier: UserTier): void {
-  if (typeof window === 'undefined') return;
-  const map = loadTiers();
-  map[email.toLowerCase()] = tier;
-  saveTiers(map);
-}
-
-// Admin-created account — adds an entry to the directory without signing them in.
-// Returns true if a new entry was added, false if one with this email already exists.
-export function createUser(email: string, name: string): boolean {
-  const cleanEmail = email.trim();
-  const cleanName  = name.trim() || cleanEmail.split('@')[0];
-  if (!cleanEmail) return false;
-  const lower = cleanEmail.toLowerCase();
-  const users = listAllUsers();
-  if (users.some((u) => u.email.toLowerCase() === lower)) return false;
-  const now = new Date().toISOString();
-  users.push({ email: cleanEmail, name: cleanName, firstSeen: now, lastSeen: now });
-  saveAllUsers(users);
-  return true;
-}
-
+// ─── Synchronous read helpers (the rest of the app calls these) ───────────
 export function isAuthed(): boolean {
-  if (typeof window === 'undefined') return false;
-  return localStorage.getItem(KEY_AUTH) === '1';
+  return useAuthStore.getState().user !== null;
 }
 
 export function getCurrentUser(): AuthUser | null {
-  if (!isAuthed()) return null;
-  return {
-    email: localStorage.getItem(KEY_EMAIL) ?? '',
-    name:  localStorage.getItem(KEY_NAME)  ?? '',
-  };
+  return useAuthStore.getState().user;
 }
 
-export function signIn(email: string, name?: string): void {
-  localStorage.setItem(KEY_AUTH,  '1');
-  localStorage.setItem(KEY_EMAIL, email);
-  // Resolution order:
-  //   1. an explicit name passed in (signup path)
-  //   2. the existing directory entry's name (so previously-edited nicknames
-  //      survive sign-out → sign-in)
-  //   3. whatever KEY_NAME still holds (legacy fallback)
-  //   4. the email prefix (first-time login with no other info)
-  let resolvedName = name?.trim() || '';
-  if (!resolvedName) {
-    const dirUser = listAllUsers().find((u) => u.email.toLowerCase() === email.toLowerCase());
-    if (dirUser?.name) resolvedName = dirUser.name;
-  }
-  if (!resolvedName) {
-    resolvedName = localStorage.getItem(KEY_NAME) || email.split('@')[0];
-  }
-  localStorage.setItem(KEY_NAME, resolvedName);
-  recordSignIn(email, resolvedName);
+export function listAllUsers(): DirectoryUser[] {
+  return useAuthStore.getState().directory.map((p) => ({
+    email: p.email,
+    name: p.display_name || p.email.split('@')[0],
+    firstSeen: p.created_at,
+    lastSeen: p.updated_at,
+  }));
 }
 
-export function signOut(): void {
-  localStorage.removeItem(KEY_AUTH);
-  localStorage.removeItem(KEY_EMAIL);
-  localStorage.removeItem(KEY_NAME);
+// ─── Mutations ────────────────────────────────────────────────────────────
+export async function signIn(email: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+  if (error) throw error;
 }
 
-// ─── Password (per-user, client-side mock) ──────────────────────────────────
-// SHA-256 via Web Crypto — not real security, but better than plain text.
-// Swap for Supabase Auth when wiring real auth.
-async function hashPassword(pw: string): Promise<string> {
-  if (typeof window === 'undefined' || !window.crypto?.subtle) return pw;
-  const buf = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(pw));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-function loadPasswords(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(KEY_PASSWORDS);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return (parsed && typeof parsed === 'object') ? parsed as Record<string, string> : {};
-  } catch { return {}; }
-}
-function savePasswords(map: Record<string, string>): void {
-  try { localStorage.setItem(KEY_PASSWORDS, JSON.stringify(map)); } catch { /* ignore */ }
-}
-export async function setPassword(email: string, password: string): Promise<void> {
-  const hash = await hashPassword(password);
-  const all = loadPasswords();
-  all[email.toLowerCase()] = hash;
-  savePasswords(all);
-}
-export async function verifyPassword(email: string, password: string): Promise<boolean> {
-  const all = loadPasswords();
-  const stored = all[email.toLowerCase()];
-  if (!stored) return false;  // no password set yet
-  return stored === await hashPassword(password);
-}
-export function hasPasswordSet(email: string): boolean {
-  return !!loadPasswords()[email.toLowerCase()];
+export async function signUp(email: string, password: string, displayName: string): Promise<void> {
+  const { error } = await supabase.auth.signUp({
+    email: email.trim(),
+    password,
+    options: { data: { display_name: displayName.trim() } },
+  });
+  if (error) throw error;
 }
 
-// ─── Avatars (color + optional image, keyed by user email) ──────────────────
-// All users share one map per kind so any user can render any other user's
-// avatar (e.g. in the admin user table, member lists, etc.).
-const KEY_AVATAR_COLORS = 'we.avatar_colors';  // { [emailLower]: hex }
-const KEY_AVATAR_IMGS   = 'we.avatar_imgs';    // { [emailLower]: dataUrl }
-export const DEFAULT_AVATAR_COLOR = '#1EC9C4';
-
-function loadMap(key: string): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return (parsed && typeof parsed === 'object') ? parsed as Record<string, string> : {};
-  } catch { return {}; }
-}
-function saveMap(key: string, map: Record<string, string>): void {
-  try { localStorage.setItem(key, JSON.stringify(map)); } catch { /* ignore */ }
-}
-function currentEmailLower(): string {
-  return (localStorage.getItem(KEY_EMAIL) ?? '').toLowerCase();
+export async function signOut(): Promise<void> {
+  await supabase.auth.signOut();
 }
 
-// One-time migration of the legacy single-user keys onto the current user's slot.
-let _migratedAvatars = false;
-function migrateLegacyAvatars(): void {
-  if (_migratedAvatars || typeof window === 'undefined') return;
-  _migratedAvatars = true;
-  const email = currentEmailLower();
-  if (!email) return;
-  // Legacy color key
-  const legacyColor = localStorage.getItem(KEY_COLOR);
-  if (legacyColor) {
-    const colors = loadMap(KEY_AVATAR_COLORS);
-    if (!colors[email]) { colors[email] = legacyColor; saveMap(KEY_AVATAR_COLORS, colors); }
-    localStorage.removeItem(KEY_COLOR);
-  }
-  // Legacy image key
-  const legacyImg = localStorage.getItem('we.avatar_img');
-  if (legacyImg) {
-    const imgs = loadMap(KEY_AVATAR_IMGS);
-    if (!imgs[email]) { imgs[email] = legacyImg; saveMap(KEY_AVATAR_IMGS, imgs); }
-    localStorage.removeItem('we.avatar_img');
-  }
+export async function requestPasswordReset(email: string): Promise<void> {
+  const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+    redirectTo: window.location.origin,
+  });
+  if (error) throw error;
+}
+
+export async function setPassword(newPassword: string): Promise<void> {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
+// ─── Profile helpers (display name, avatar, tier) ────────────────────────
+export async function setNickname(newName: string): Promise<void> {
+  const trimmed = newName.trim();
+  if (!trimmed) return;
+  await updateMyProfile({ display_name: trimmed });
+  // Optimistic local update so the sidebar refreshes without a roundtrip.
+  const s = useAuthStore.getState();
+  if (s.profile) s.setProfile({ ...s.profile, display_name: trimmed });
+}
+
+export function getUserTier(email?: string): UserTier {
+  const s = useAuthStore.getState();
+  if (!email) return s.profile?.tier ?? 'Agent';
+  const p = s.directory.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  return p?.tier ?? 'Agent';
 }
 
 export function getAvatarColor(email?: string): string {
-  if (typeof window === 'undefined') return DEFAULT_AVATAR_COLOR;
-  migrateLegacyAvatars();
-  const e = (email ?? currentEmailLower()).toLowerCase();
-  return loadMap(KEY_AVATAR_COLORS)[e] || DEFAULT_AVATAR_COLOR;
-}
-export function setAvatarColor(color: string, email?: string): void {
-  if (typeof window === 'undefined') return;
-  const e = (email ?? currentEmailLower()).toLowerCase();
-  if (!e) return;
-  const map = loadMap(KEY_AVATAR_COLORS);
-  map[e] = color;
-  saveMap(KEY_AVATAR_COLORS, map);
+  const s = useAuthStore.getState();
+  if (!email) return s.profile?.avatar_color ?? DEFAULT_AVATAR_COLOR;
+  const p = s.directory.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  return p?.avatar_color ?? DEFAULT_AVATAR_COLOR;
 }
 
 export function getAvatarImage(email?: string): string | null {
-  if (typeof window === 'undefined') return null;
-  migrateLegacyAvatars();
-  const e = (email ?? currentEmailLower()).toLowerCase();
-  return loadMap(KEY_AVATAR_IMGS)[e] || null;
-}
-export function setAvatarImage(dataUrl: string, email?: string): void {
-  if (typeof window === 'undefined') return;
-  const e = (email ?? currentEmailLower()).toLowerCase();
-  if (!e) return;
-  const map = loadMap(KEY_AVATAR_IMGS);
-  map[e] = dataUrl;
-  saveMap(KEY_AVATAR_IMGS, map);
-}
-export function clearAvatarImage(email?: string): void {
-  if (typeof window === 'undefined') return;
-  const e = (email ?? currentEmailLower()).toLowerCase();
-  if (!e) return;
-  const map = loadMap(KEY_AVATAR_IMGS);
-  delete map[e];
-  saveMap(KEY_AVATAR_IMGS, map);
+  const s = useAuthStore.getState();
+  if (!email) return s.profile?.avatar_url ?? null;
+  const p = s.directory.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  return p?.avatar_url ?? null;
 }
 
-// Update the user's nickname AND
-//   1. update their entry in the directory (we.users) so member/admin tables refresh
-//   2. retroactively rewrite the `agent` field on every prospect that matched the old name
-// Returns the old nickname so callers can decide what to do (e.g. reload).
-export function setNickname(newName: string): string | null {
-  const oldName = localStorage.getItem(KEY_NAME);
-  const trimmed = newName.trim();
-  if (!trimmed || trimmed === oldName) return oldName;
-  localStorage.setItem(KEY_NAME, trimmed);
+export async function setAvatarColor(color: string): Promise<void> {
+  await updateMyProfile({ avatar_color: color });
+  const s = useAuthStore.getState();
+  if (s.profile) s.setProfile({ ...s.profile, avatar_color: color });
+}
 
-  // Sync directory entry so AdminControl / member lists pick up the new name.
-  const email = localStorage.getItem(KEY_EMAIL);
-  if (email) {
-    const lower = email.toLowerCase();
-    const users = listAllUsers();
-    const idx = users.findIndex((u) => u.email.toLowerCase() === lower);
-    if (idx >= 0) {
-      users[idx] = { ...users[idx], name: trimmed };
-      saveAllUsers(users);
-    }
+export async function setAvatarImage(file: File): Promise<void> {
+  const s = useAuthStore.getState();
+  if (!s.user) throw new Error('Not authenticated');
+  const ext = (file.name.split('.').pop() ?? 'png').toLowerCase();
+  const path = `${s.user.id}/avatar.${ext}`;
+
+  const { error: upErr } = await supabase.storage.from('avatars').upload(path, file, {
+    cacheControl: '3600',
+    upsert: true,
+    contentType: file.type || `image/${ext}`,
+  });
+  if (upErr) throw upErr;
+
+  const { data: pub } = supabase.storage.from('avatars').getPublicUrl(path);
+  const url = pub.publicUrl ? `${pub.publicUrl}?v=${Date.now()}` : null;
+
+  await updateMyProfile({ avatar_url: url });
+  if (s.profile) s.setProfile({ ...s.profile, avatar_url: url });
+}
+
+export async function clearAvatarImage(): Promise<void> {
+  const s = useAuthStore.getState();
+  if (!s.user) return;
+  // List & remove all files in the user's avatar folder.
+  const { data: files } = await supabase.storage.from('avatars').list(s.user.id, { limit: 50 });
+  if (files && files.length > 0) {
+    await supabase.storage.from('avatars').remove(files.map((f) => `${s.user!.id}/${f.name}`));
   }
-
-  if (oldName) {
-    try {
-      const raw = localStorage.getItem('we.crm.state');
-      if (raw) {
-        const state = JSON.parse(raw) as { prospects?: Record<string, Array<{ agent?: string }>> };
-        if (state.prospects) {
-          for (const boardId of Object.keys(state.prospects)) {
-            for (const p of state.prospects[boardId]) {
-              if (p.agent === oldName) p.agent = trimmed;
-            }
-          }
-          localStorage.setItem('we.crm.state', JSON.stringify(state));
-        }
-      }
-    } catch { /* ignore — user can re-edit if needed */ }
-  }
-  return oldName;
+  await updateMyProfile({ avatar_url: null });
+  if (s.profile) s.setProfile({ ...s.profile, avatar_url: null });
 }

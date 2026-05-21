@@ -6,13 +6,15 @@ import {
 } from 'lucide-react';
 import {
   getCurrentUser, signOut as authSignOut, setNickname, getAvatarColor, setAvatarColor,
-  listAllUsers, setPassword, verifyPassword, hasPasswordSet,
+  listAllUsers, setPassword,
   getAvatarImage, setAvatarImage, clearAvatarImage, getUserTier,
 } from '@/lib/auth';
 import { getUserRole, ROLES, type Role } from '@/lib/permissions';
 import { ROUTE_PATHS } from '@/lib/index';
 
-const MASTER_ADMIN_EMAIL = 'linux@whyestate.com';
+// Role is now derived from the profiles table (Supabase Auth backed); the old
+// hard-coded master email is gone, the trigger handle_new_user promotes the
+// first signup to master_admin automatically.
 
 // Saturated palette matching BoardCard colors — used for avatar fill.
 const AVATAR_COLORS = [
@@ -44,7 +46,6 @@ function fmtRelative(iso: string | undefined): string {
 
 function resolveRole(email: string | undefined): Role {
   if (!email) return 'viewer';
-  if (email.toLowerCase() === MASTER_ADMIN_EMAIL) return 'master_admin';
   return getUserRole(email);
 }
 
@@ -77,7 +78,7 @@ export default function MyProfile() {
           </div>
 
           <div className="p-6">
-            {tab === 'profile'  && <ProfileTab navigate={navigate} signOut={() => { authSignOut(); navigate('/'); }} email={me.email} name={me.name} />}
+            {tab === 'profile'  && <ProfileTab navigate={navigate} signOut={async () => { await authSignOut(); navigate('/'); }} email={me.email} name={me.name} />}
             {tab === 'security' && <SecurityTab email={me.email} />}
           </div>
         </div>
@@ -130,6 +131,7 @@ function ProfileTab({ navigate, signOut, email, name }: {
   const [editing,  setEditing] = useState(false);
   const [avatar,   setAvatar]  = useState(getAvatarColor());
   const [avatarImg, setAvatarImg] = useState<string | null>(getAvatarImage());
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -140,31 +142,35 @@ function ProfileTab({ navigate, signOut, email, name }: {
   const dirty =
     (nickname.trim() && nickname.trim() !== name) ||
     avatar !== getAvatarColor() ||
-    avatarImg !== getAvatarImage();
+    pendingFile !== null ||
+    (avatarImg === null && getAvatarImage() !== null);
 
-  const save = () => {
-    const next = nickname.trim();
-    if (next && next !== name) setNickname(next);
-    if (avatar !== getAvatarColor()) setAvatarColor(avatar);
-    if (avatarImg !== getAvatarImage()) {
-      if (avatarImg) setAvatarImage(avatarImg);
-      else clearAvatarImage();
+  const save = async () => {
+    try {
+      const next = nickname.trim();
+      if (next && next !== name) await setNickname(next);
+      if (avatar !== getAvatarColor()) await setAvatarColor(avatar);
+      if (pendingFile) await setAvatarImage(pendingFile);
+      else if (avatarImg === null && getAvatarImage() !== null) await clearAvatarImage();
+      window.location.reload();
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : 'Save failed');
     }
-    window.location.reload();
   };
   const cancel = () => {
     setNick(name);
     setAvatar(getAvatarColor());
     setAvatarImg(getAvatarImage());
+    setPendingFile(null);
     setUploadError(null);
     setEditing(false);
   };
 
-  // Resize uploaded image to keep localStorage usage reasonable (256px square, JPEG q=0.85).
+  // Resize uploaded image to keep transfer size reasonable (256px square, JPEG q=0.85).
   const onPickFile = (file: File) => {
     setUploadError(null);
     if (!file.type.startsWith('image/')) { setUploadError('Please pick an image file.'); return; }
-    if (file.size > 8 * 1024 * 1024)     { setUploadError('Image must be under 8 MB.'); return; }
+    if (file.size > 5 * 1024 * 1024)     { setUploadError('Image must be under 5 MB.'); return; }
     const reader = new FileReader();
     reader.onload = (ev) => {
       const dataUrl = ev.target?.result as string;
@@ -174,13 +180,17 @@ function ProfileTab({ navigate, signOut, email, name }: {
         const canvas = document.createElement('canvas');
         canvas.width = SIZE; canvas.height = SIZE;
         const ctx = canvas.getContext('2d');
-        if (!ctx) { setAvatarImg(dataUrl); return; }
-        // Center-crop to square then scale.
+        if (!ctx) { setAvatarImg(dataUrl); setPendingFile(file); return; }
         const min = Math.min(img.width, img.height);
         const sx = (img.width - min) / 2;
         const sy = (img.height - min) / 2;
         ctx.drawImage(img, sx, sy, min, min, 0, 0, SIZE, SIZE);
-        setAvatarImg(canvas.toDataURL('image/jpeg', 0.85));
+        canvas.toBlob((blob) => {
+          if (!blob) { setUploadError('Could not encode image.'); return; }
+          const ext = (file.name.split('.').pop() ?? 'jpg').toLowerCase();
+          setPendingFile(new File([blob], `avatar.${ext}`, { type: 'image/jpeg' }));
+          setAvatarImg(canvas.toDataURL('image/jpeg', 0.85));
+        }, 'image/jpeg', 0.85);
       };
       img.onerror = () => setUploadError('Could not read this image.');
       img.src = dataUrl;
@@ -359,8 +369,8 @@ function ProfileTab({ navigate, signOut, email, name }: {
 }
 
 // ─── Security tab ───────────────────────────────────────────────────────────
-function SecurityTab({ email }: { email: string }) {
-  const accountHasPassword = hasPasswordSet(email);
+function SecurityTab({ email: _email }: { email: string }) {
+  const accountHasPassword = true; // Supabase Auth accounts always have one.
   const [current,   setCurrent]   = useState('');
   const [next,      setNext]      = useState('');
   const [confirm,   setConfirm]   = useState('');
@@ -370,22 +380,22 @@ function SecurityTab({ email }: { email: string }) {
 
   const submit = async () => {
     setError(null); setSuccess(false);
-    if (accountHasPassword) {
-      if (!current) { setError('Please enter your current password.'); return; }
-    }
     if (!next)                 { setError('Please enter a new password.'); return; }
+    if (next.length < 6)       { setError('Password must be at least 6 characters.'); return; }
     if (next !== confirm)      { setError('New passwords do not match.'); return; }
-    if (accountHasPassword && current === next) { setError('New password must differ from current.'); return; }
 
     setBusy(true);
-    if (accountHasPassword) {
-      const ok = await verifyPassword(email, current);
-      if (!ok) { setBusy(false); setError('Current password is incorrect.'); return; }
+    try {
+      // Supabase Auth requires an active session — the current password isn't
+      // re-verified here; instead Supabase rotates the session on success.
+      await setPassword(next);
+      setSuccess(true);
+      setCurrent(''); setNext(''); setConfirm('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update password.');
+    } finally {
+      setBusy(false);
     }
-    await setPassword(email, next);
-    setBusy(false);
-    setSuccess(true);
-    setCurrent(''); setNext(''); setConfirm('');
   };
 
   const cancel = () => {

@@ -1,21 +1,22 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   ShieldCheck, Check, RotateCcw, Save, ChevronLeft, ChevronRight, Settings2, Search, Users as UsersIcon,
-  Eye, EyeOff, KeyRound, UserPlus, X, AlertCircle, Pencil,
+  KeyRound, UserPlus, X, AlertCircle, Pencil, Copy,
 } from 'lucide-react';
 import {
   PERMISSIONS, PERMISSION_GROUPS, ROLES,
-  loadRolePerms, saveRolePerms, resetRolePerms,
+  resetRolePerms,
   getUserRole, setUserRole,
   type Role, type RolePerms,
 } from '@/lib/permissions';
 import {
-  getCurrentUser, listAllUsers, removeUserFromDirectory, createUser, setPassword, setUserName,
-  getAvatarColor, getAvatarImage, getUserTier, setUserTier, USER_TIERS,
+  getCurrentUser, listAllUsers, refreshDirectory, useAuthStore, requestPasswordReset,
+  getAvatarColor, getAvatarImage, getUserTier, USER_TIERS,
   type DirectoryUser, type UserTier,
 } from '@/lib/auth';
-
-const MASTER_ADMIN_EMAIL = 'linux@whyestate.com';
+import { loadRolePerms, saveRolePerms as saveRolePermsApi } from '@/api/permissions';
+import { adminUpdateProfile, adminSetUserTier, deleteUser } from '@/api/profiles';
+import { createInvite, listInvites, revokeInvite, type Invite } from '@/api/invites';
 
 type Section = 'main' | 'prospect-hub' | 'user-setting';
 
@@ -114,44 +115,12 @@ function UserSetting({ onBack }: { onBack: () => void }) {
 }
 
 // ─── Users table — assign roles ─────────────────────────────────────────────
-// Source of truth: the user directory (every signup is recorded by auth.signIn).
-// We also merge in board owners / members from CRM state so legacy accounts that
-// pre-date the directory still appear.
+// Source of truth: the profiles table via the auth store. The legacy
+// localStorage `we.crm.state` merge is gone — every user is now a real
+// Supabase Auth account, and the trigger handle_new_user keeps profiles in
+// sync on every signup.
 function listKnownUsers(): DirectoryUser[] {
-  const byEmail = new Map<string, DirectoryUser>();
-  for (const u of listAllUsers()) {
-    byEmail.set(u.email.toLowerCase(), u);
-  }
-
-  const stamp = new Date().toISOString();
-  const me = getCurrentUser();
-  if (me && !byEmail.has(me.email.toLowerCase())) {
-    byEmail.set(me.email.toLowerCase(), { email: me.email, name: me.name, firstSeen: stamp, lastSeen: stamp });
-  }
-
-  try {
-    const raw = localStorage.getItem('we.crm.state');
-    if (raw) {
-      const crm = JSON.parse(raw) as {
-        boards?:  Array<{ ownerEmail?: string; ownerName?: string }>;
-        members?: Record<string, Array<{ email: string }>>;
-      };
-      for (const b of crm.boards ?? []) {
-        if (b.ownerEmail) {
-          const k = b.ownerEmail.toLowerCase();
-          if (!byEmail.has(k)) byEmail.set(k, { email: b.ownerEmail, name: b.ownerName ?? b.ownerEmail.split('@')[0], firstSeen: stamp, lastSeen: stamp });
-        }
-      }
-      for (const list of Object.values(crm.members ?? {})) {
-        for (const m of list) {
-          const k = m.email.toLowerCase();
-          if (!byEmail.has(k)) byEmail.set(k, { email: m.email, name: m.email.split('@')[0], firstSeen: stamp, lastSeen: stamp });
-        }
-      }
-    }
-  } catch { /* ignore */ }
-
-  return Array.from(byEmail.values()).sort((a, b) => a.email.localeCompare(b.email));
+  return [...listAllUsers()].sort((a, b) => a.email.localeCompare(b.email));
 }
 
 function UsersTable() {
@@ -171,32 +140,51 @@ function UsersTable() {
     return u.email.toLowerCase().includes(lower) || (u.name ?? '').toLowerCase().includes(lower);
   });
 
-  const handleRoleChange = (email: string, role: Role) => {
-    setUserRole(email, role);
-    setTick((t) => t + 1); // force re-render so dropdowns reflect saved state
+  // Resolve a directory user → underlying profile id via the auth store.
+  const profileIdFor = (email: string): string | null => {
+    const lower = email.toLowerCase();
+    return useAuthStore.getState().directory.find((p) => p.email.toLowerCase() === lower)?.id ?? null;
   };
-  const handleTierChange = (email: string, tier: UserTier) => {
-    setUserTier(email, tier);
-    setTick((t) => t + 1);
+
+  const handleRoleChange = async (email: string, role: Role) => {
+    try { await setUserRole(email, role); await refreshDirectory(); setTick((t) => t + 1); }
+    catch (e) { console.error('setUserRole failed', e); }
+  };
+  const handleTierChange = async (email: string, tier: UserTier) => {
+    const id = profileIdFor(email);
+    if (!id) return;
+    try { await adminSetUserTier(id, tier); await refreshDirectory(); setTick((t) => t + 1); }
+    catch (e) { console.error('setUserTier failed', e); }
   };
 
   const startEdit = (u: DirectoryUser) => { setEditingEmail(u.email); setDraftName(u.name || ''); };
   const cancelEdit = () => { setEditingEmail(null); setDraftName(''); };
-  const saveEdit = (u: DirectoryUser) => {
+  const saveEdit = async (u: DirectoryUser) => {
     const trimmed = draftName.trim();
     if (trimmed && trimmed !== u.name) {
-      setUserName(u.email, trimmed);
-      // If the renamed user is currently signed in on this browser, reload so
-      // every avatar / name pill (sidebar, topbar, prospect agent column, etc.)
-      // picks up the change. Otherwise the table re-render is enough.
-      if (u.email.toLowerCase() === myEmail) {
-        window.location.reload();
-        return;
-      }
-      setTick((t) => t + 1);
+      try {
+        const id = profileIdFor(u.email);
+        if (id) {
+          await adminUpdateProfile(id, { display_name: trimmed });
+          await refreshDirectory();
+        }
+        if (u.email.toLowerCase() === myEmail) {
+          window.location.reload();
+          return;
+        }
+        setTick((t) => t + 1);
+      } catch (e) { console.error('rename user failed', e); }
     }
     setEditingEmail(null);
     setDraftName('');
+  };
+
+  const handleRemove = async (u: DirectoryUser) => {
+    if (!window.confirm(`Permanently remove ${u.email}? Their boards, clients, and files will be deleted (cascades through FKs).`)) return;
+    const id = profileIdFor(u.email);
+    if (!id) return;
+    try { await deleteUser(id); await refreshDirectory(); setTick((t) => t + 1); }
+    catch (e) { console.error('deleteUser failed', e); alert((e as Error).message); }
   };
 
   return (
@@ -309,12 +297,7 @@ function UsersTable() {
                       </button>
                       <button
                         disabled={isMe}
-                        onClick={() => {
-                          if (window.confirm(`Remove ${u.email} from the user directory?\n\nThey can sign up again with the secret code.`)) {
-                            removeUserFromDirectory(u.email);
-                            setTick((t) => t + 1);
-                          }
-                        }}
+                        onClick={() => handleRemove(u)}
                         className="text-xs font-medium px-2.5 py-1 rounded-lg border hover:bg-red-50 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-center"
                         style={{ color: '#DC2626', borderColor: '#FECACA', minWidth: 72 }}
                         title={isMe ? "You can't remove yourself" : 'Remove user'}>
@@ -346,20 +329,20 @@ function UsersTable() {
   );
 }
 
-// ─── Add User modal ─────────────────────────────────────────────────────────
+// ─── Add User modal — issues a single-use invite (real account is created
+//     when the invitee signs up with the code on the public landing page).
 function AddUserModal({ existingEmails, onClose, onCreated }: {
   existingEmails: string[];
   onClose: () => void;
   onCreated: () => void;
 }) {
   const [email, setEmail]   = useState('');
-  const [name,  setName]    = useState('');
-  const [pwd,   setPwd]     = useState('');
   const [role,  setRole]    = useState<Role>('viewer');
   const [tier,  setTier]    = useState<UserTier>('Agent');
-  const [showPwd, setShow]  = useState(false);
   const [busy,  setBusy]    = useState(false);
   const [error, setError]   = useState<string | null>(null);
+  const [issued, setIssued] = useState<Invite | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -372,19 +355,26 @@ function AddUserModal({ existingEmails, onClose, onCreated }: {
 
   const submit = async () => {
     setError(null);
-    if (!validEmail(email))            { setError('Please enter a valid email.'); return; }
-    if (existingSet.has(email.toLowerCase())) { setError('A user with this email already exists.'); return; }
-    if (!name.trim())                  { setError('Please enter a display name.'); return; }
-    if (!pwd)                          { setError('Please set a password.'); return; }
+    if (!validEmail(email))                    { setError('Please enter a valid email.'); return; }
+    if (existingSet.has(email.toLowerCase()))  { setError('A user with this email already exists.'); return; }
+    if (role === 'master_admin')               { setError('Master Admin cannot be granted via invite.'); return; }
 
     setBusy(true);
-    const ok = createUser(email.trim(), name.trim());
-    if (!ok) { setBusy(false); setError('Could not create user.'); return; }
-    await setPassword(email.trim(), pwd);
-    setUserRole(email.trim(), role);
-    setUserTier(email.trim(), tier);
-    setBusy(false);
-    onCreated();
+    try {
+      const invite = await createInvite({ email: email.trim().toLowerCase(), role, tier });
+      setIssued(invite);
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create invite');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!issued) return;
+    try { await navigator.clipboard.writeText(issued.code); setCopied(true); setTimeout(() => setCopied(false), 1500); }
+    catch { /* ignore */ }
   };
 
   // Master Admin can't be assigned via this form — it's gated to a single account.
@@ -399,64 +389,74 @@ function AddUserModal({ existingEmails, onClose, onCreated }: {
               <UserPlus size={15} style={{ color: '#0F766E' }} />
             </div>
             <div>
-              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Add user</h3>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Create an account and set the initial password</p>
+              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Invite user</h3>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
+                {issued ? 'Share the code below — it expires in 14 days' : 'Issue a one-time code; the invitee signs up themselves'}
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
         </div>
 
-        <div className="px-6 pb-5 space-y-4">
-          <Field label="Email">
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@whyestate.com" type="email"
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-              style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-          </Field>
-          <Field label="Display name">
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="John Doe"
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-              style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-          </Field>
-          <Field label="Password">
-            <div className="relative">
-              <input type={showPwd ? 'text' : 'password'} value={pwd} onChange={(e) => setPwd(e.target.value)}
-                placeholder="Initial password" autoComplete="new-password"
-                className="w-full px-3 py-2 pr-10 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
+        {issued ? (
+          <div className="px-6 pb-5 space-y-4">
+            <div className="rounded-xl border px-3 py-3" style={{ borderColor: '#D1F2EF', background: '#F0FBFA' }}>
+              <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#0F766E' }}>Invite code for {issued.email}</p>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="flex-1 text-lg font-mono font-bold tracking-[0.18em] text-center py-2 rounded-lg"
+                  style={{ background: 'white', color: '#0F766E', border: '1px solid #D1F2EF' }}>{issued.code}</code>
+                <button onClick={copy}
+                  className="px-2.5 py-2 rounded-lg text-[11px] font-semibold flex items-center gap-1 hover:bg-[#DAF3F2]"
+                  style={{ color: '#0F766E', border: '1px solid #D1F2EF', background: 'white' }}>
+                  {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            </div>
+            <p className="text-[11px]" style={{ color: '#6B7280' }}>
+              Send this to <strong>{issued.email}</strong> along with the sign-up URL. They'll be promoted to{' '}
+              <strong>{ROLES.find((r) => r.id === issued.role)?.label}</strong> automatically once they redeem it.
+            </p>
+          </div>
+        ) : (
+          <div className="px-6 pb-5 space-y-4">
+            <Field label="Email">
+              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@whyestate.com" type="email"
+                className="w-full px-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
                 style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-              <button type="button" tabIndex={-1} onClick={() => setShow((s) => !s)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600">
-                {showPwd ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-          </Field>
-          <Field label="Tier">
-            <select value={tier} onChange={(e) => setTier(e.target.value as UserTier)}
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm bg-white"
-              style={{ borderColor: '#E5E7EB' }}>
-              {USER_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </Field>
-          <Field label="Permission">
-            <select value={role} onChange={(e) => setRole(e.target.value as Role)}
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm bg-white"
-              style={{ borderColor: '#E5E7EB' }}>
-              {invitableRoles.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
-            </select>
-          </Field>
-          {error && (
-            <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs" style={{ background: '#FEE2E2', color: '#991B1B' }}>
-              <AlertCircle size={13} className="mt-0.5 flex-shrink-0" /> <span>{error}</span>
-            </div>
-          )}
-        </div>
+            </Field>
+            <Field label="Tier">
+              <select value={tier} onChange={(e) => setTier(e.target.value as UserTier)}
+                className="w-full px-3 py-2 rounded-lg border outline-none text-sm bg-white"
+                style={{ borderColor: '#E5E7EB' }}>
+                {USER_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </Field>
+            <Field label="Permission">
+              <select value={role} onChange={(e) => setRole(e.target.value as Role)}
+                className="w-full px-3 py-2 rounded-lg border outline-none text-sm bg-white"
+                style={{ borderColor: '#E5E7EB' }}>
+                {invitableRoles.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+              </select>
+            </Field>
+            {error && (
+              <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs" style={{ background: '#FEE2E2', color: '#991B1B' }}>
+                <AlertCircle size={13} className="mt-0.5 flex-shrink-0" /> <span>{error}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
-          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
-          <button onClick={submit} disabled={busy}
-            className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ background: '#1EC9C4' }}>
-            {busy ? 'Creating…' : 'Create user'}
+          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">
+            {issued ? 'Done' : 'Cancel'}
           </button>
+          {!issued && (
+            <button onClick={submit} disabled={busy}
+              className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: '#1EC9C4' }}>
+              {busy ? 'Issuing…' : 'Issue invite'}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -464,10 +464,9 @@ function AddUserModal({ existingEmails, onClose, onCreated }: {
 }
 
 // ─── Reset password modal ───────────────────────────────────────────────────
+// Supabase Auth handles password resets via email links — admins trigger the
+// flow but the user clicks through the recovery link to set their own password.
 function ResetPasswordModal({ target, onClose }: { target: DirectoryUser; onClose: () => void }) {
-  const [pwd, setPwd]       = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [showPwd, setShow]  = useState(false);
   const [busy, setBusy]     = useState(false);
   const [error, setError]   = useState<string | null>(null);
   const [done, setDone]     = useState(false);
@@ -480,12 +479,15 @@ function ResetPasswordModal({ target, onClose }: { target: DirectoryUser; onClos
 
   const submit = async () => {
     setError(null);
-    if (!pwd) { setError('Please enter a new password.'); return; }
-    if (pwd !== confirm) { setError('Passwords do not match.'); return; }
     setBusy(true);
-    await setPassword(target.email, pwd);
-    setBusy(false);
-    setDone(true);
+    try {
+      await requestPasswordReset(target.email);
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send reset email.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -505,24 +507,9 @@ function ResetPasswordModal({ target, onClose }: { target: DirectoryUser; onClos
         </div>
 
         <div className="px-6 pb-5 space-y-4">
-          <Field label="New password">
-            <div className="relative">
-              <input type={showPwd ? 'text' : 'password'} value={pwd} onChange={(e) => setPwd(e.target.value)}
-                placeholder="Enter new password" autoComplete="new-password"
-                className="w-full px-3 py-2 pr-10 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-                style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-              <button type="button" tabIndex={-1} onClick={() => setShow((s) => !s)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600">
-                {showPwd ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-          </Field>
-          <Field label="Confirm new password">
-            <input type={showPwd ? 'text' : 'password'} value={confirm} onChange={(e) => setConfirm(e.target.value)}
-              placeholder="Re-enter new password" autoComplete="new-password"
-              className="w-full px-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-              style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-          </Field>
+          <p className="text-xs leading-relaxed" style={{ color: '#6B7280' }}>
+            Supabase will send a secure reset link to <strong>{target.email}</strong>. They'll click the link to choose a new password. Admins can't set passwords directly — keeps the user's credentials private.
+          </p>
           {error && (
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs" style={{ background: '#FEE2E2', color: '#991B1B' }}>
               <AlertCircle size={13} className="mt-0.5 flex-shrink-0" /> <span>{error}</span>
@@ -531,7 +518,7 @@ function ResetPasswordModal({ target, onClose }: { target: DirectoryUser; onClos
           {done && (
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs" style={{ background: '#DCFCE7', color: '#166534' }}>
               <Check size={13} className="mt-0.5 flex-shrink-0" />
-              <span>Password updated. Share the new password with {target.name || target.email}.</span>
+              <span>Reset link sent. {target.name || target.email} should check their inbox.</span>
             </div>
           )}
         </div>
@@ -543,8 +530,8 @@ function ResetPasswordModal({ target, onClose }: { target: DirectoryUser; onClos
           {!done && (
             <button onClick={submit} disabled={busy}
               className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ background: '#9C1F2D' }}>
-              {busy ? 'Saving…' : 'Reset password'}
+              style={{ background: '#1EC9C4' }}>
+              {busy ? 'Sending…' : 'Send reset email'}
             </button>
           )}
         </div>
@@ -596,10 +583,24 @@ function TierPicker({ value, onChange }: { value: UserTier; onChange: (t: UserTi
 }
 
 // ─── Prospect Hub Setting (permissions matrix) ──────────────────────────────
+const EMPTY_PERMS: RolePerms = { master_admin: [], admin: [], editor: [], viewer: [] };
+
 function ProspectHubSettings({ onBack }: { onBack: () => void }) {
-  const [perms, setPerms]     = useState<RolePerms>(() => loadRolePerms());
-  const [saved, setSaved]     = useState<RolePerms>(perms);
+  const [perms, setPerms]     = useState<RolePerms>(EMPTY_PERMS);
+  const [saved, setSaved]     = useState<RolePerms>(EMPTY_PERMS);
+  const [loading, setLoading] = useState(true);
   const dirty = JSON.stringify(perms) !== JSON.stringify(saved);
+
+  useEffect(() => {
+    let alive = true;
+    loadRolePerms().then((p) => {
+      if (!alive) return;
+      setPerms(p); setSaved(p); setLoading(false);
+    }).catch((e) => {
+      console.error('loadRolePerms', e); setLoading(false);
+    });
+    return () => { alive = false; };
+  }, []);
 
   const isChecked = (role: Role, key: string): boolean => {
     if (role === 'master_admin') return true;
@@ -616,15 +617,35 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const save = () => { saveRolePerms(perms); setSaved(perms); };
-
-  const reset = () => {
-    if (!window.confirm('Reset all role permissions back to their factory defaults?')) return;
-    resetRolePerms();
-    const fresh = loadRolePerms();
-    setPerms(fresh);
-    setSaved(fresh);
+  const save = async () => {
+    try {
+      // Save only the editable rows.
+      await Promise.all([
+        saveRolePermsApi('admin',  perms.admin),
+        saveRolePermsApi('editor', perms.editor),
+        saveRolePermsApi('viewer', perms.viewer),
+      ]);
+      setSaved(perms);
+    } catch (e) { console.error('saveRolePerms', e); }
   };
+
+  const reset = async () => {
+    if (!window.confirm('Reset all role permissions back to their factory defaults?')) return;
+    try {
+      await resetRolePerms();
+      const fresh = await loadRolePerms();
+      setPerms(fresh);
+      setSaved(fresh);
+    } catch (e) { console.error('resetRolePerms', e); }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex-1 px-6 py-6">
+        <p className="text-sm text-gray-400">Loading permissions…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex-1 px-6 py-6">

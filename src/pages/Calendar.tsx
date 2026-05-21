@@ -1,15 +1,27 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   Calendar as CalendarIcon, ChevronLeft, ChevronRight, Plus, X, Trash2,
   Mail, MapPin, FileText, Check, Loader2, ExternalLink, Link as LinkIcon, AlertCircle, Pencil,
 } from 'lucide-react';
 import {
-  listEvents, createEvent, updateEvent, deleteEvent,
-  getGoogleState, connectGoogleMock, disconnectGoogle, syncEventToGoogle,
+  listEvents, createEvent, updateEvent, deleteEvent, syncEventToGoogle,
   monthGridDays, isSameDay, fmtMonth, fmtTime, isoFromDateTime,
-  EVENT_COLORS, EVENT_TITLE_PRESETS, type CalEvent, type GoogleState,
-} from '@/lib/calendar';
+  EVENT_COLORS, EVENT_TITLE_PRESETS, type CalEvent,
+} from '@/api/calendar';
+import { getMyConnection, connectMock, disconnect as disconnectGoogle, type GoogleConnection } from '@/api/google';
 import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
+
+// Compatibility shape — mirrors the old GoogleState exposed by lib/calendar.
+interface GoogleState {
+  connected: boolean;
+  email?: string;
+  connectedAt?: string;
+}
+function toGoogleState(c: GoogleConnection | null): GoogleState {
+  if (!c) return { connected: false };
+  return { connected: c.calendar_connected, email: c.email, connectedAt: c.connected_at };
+}
 
 type ViewMode = 'month' | 'agenda';
 
@@ -17,7 +29,6 @@ export default function CalendarPage() {
   const me = getCurrentUser();
   const myEmail = me?.email ?? '';
 
-  const [tick, setTick]             = useState(0);
   const [cursor, setCursor]         = useState(new Date());
   const [view, setView]             = useState<ViewMode>('month');
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
@@ -25,9 +36,25 @@ export default function CalendarPage() {
   const [newEventSeed, setNewEventSeed] = useState<{ start: Date } | null>(null);
   const [showConnect, setShowConnect]   = useState(false);
 
-  const events = useMemo(() => listEvents(), [tick]);
-  const google = useMemo<GoogleState>(() => getGoogleState(), [tick]);
-  const refresh = () => setTick((t) => t + 1);
+  const [events, setEvents] = useState<CalEvent[]>([]);
+  const [google, setGoogle] = useState<GoogleState>({ connected: false });
+
+  const refresh = useCallback(async () => {
+    try {
+      const [evs, conn] = await Promise.all([listEvents(), getMyConnection()]);
+      setEvents(evs);
+      setGoogle(toGoogleState(conn));
+    } catch (e) { console.error('calendar refresh failed', e); }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    const ch = supabase.channel('calendar-page')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'calendar_events' }, () => void refresh())
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [refresh]);
 
   const days = useMemo(() => monthGridDays(cursor), [cursor]);
   const eventsByDay = useMemo(() => {
@@ -137,8 +164,8 @@ export default function CalendarPage() {
           myEmail={myEmail}
           googleConnected={google.connected}
           onClose={() => { setNewEventSeed(null); setEditingEvent(null); }}
-          onSaved={() => { setNewEventSeed(null); setEditingEvent(null); refresh(); }}
-          onDeleted={() => { setEditingEvent(null); refresh(); }}
+          onSaved={() => { setNewEventSeed(null); setEditingEvent(null); void refresh(); }}
+          onDeleted={() => { setEditingEvent(null); void refresh(); }}
         />
       )}
       {showConnect && (
@@ -146,7 +173,7 @@ export default function CalendarPage() {
           google={google}
           email={myEmail}
           onClose={() => setShowConnect(false)}
-          onChanged={() => { setShowConnect(false); refresh(); }}
+          onChanged={() => { setShowConnect(false); void refresh(); }}
         />
       )}
     </div>
@@ -309,9 +336,13 @@ function EventModal({
     title: '',
     start: (seed?.start ?? new Date()).toISOString(),
     end:   new Date((seed?.start ?? new Date()).getTime() + 60 * 60_000).toISOString(),
+    allDay: false,
     color: EVENT_COLORS[0],
-    ownerEmail: myEmail,
+    ownerId: '',
+    attendees: [],
+    clients: [],
   };
+  void myEmail;
 
   const [title,    setTitle]    = useState(initial.title);
   const [date,     setDate]     = useState(toDateInput(initial.start));
@@ -345,35 +376,41 @@ function EventModal({
     const endIso   = isoFromDateTime(dateObj, eh, em);
     if (new Date(endIso) <= new Date(startIso)) { setError('End must be after start.'); return; }
     setBusy(true);
-    let eventId = existing?.id;
-    if (existing) {
-      updateEvent(existing.id, {
-        title: title.trim(), start: startIso, end: endIso,
-        location: location.trim() || undefined,
-        notes: notes.trim() || undefined,
-        attendees,
-        clients: clients.length ? clients : undefined,
-        listing: listing.trim() || undefined,
-        color,
-      });
-    } else {
-      const created = createEvent({
-        title: title.trim(), start: startIso, end: endIso,
-        location: location.trim() || undefined,
-        notes: notes.trim() || undefined,
-        attendees,
-        clients: clients.length ? clients : undefined,
-        listing: listing.trim() || undefined,
-        color,
-        ownerEmail: myEmail,
-      });
-      eventId = created.id;
+    try {
+      let eventId = existing?.id;
+      if (existing) {
+        await updateEvent(existing.id, {
+          title: title.trim(), start: startIso, end: endIso,
+          location: location.trim() || null,
+          notes: notes.trim() || null,
+          attendees,
+          clients: clients.length ? clients : [],
+          listing: listing.trim() || null,
+          color,
+          allDay: false,
+        });
+      } else {
+        const created = await createEvent({
+          title: title.trim(), start: startIso, end: endIso,
+          location: location.trim() || null,
+          notes: notes.trim() || null,
+          attendees,
+          clients: clients.length ? clients : [],
+          listing: listing.trim() || null,
+          color,
+          allDay: false,
+        });
+        eventId = created.id;
+      }
+      if (syncGoogle && googleConnected && eventId) {
+        await syncEventToGoogle(eventId);
+      }
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setBusy(false);
     }
-    if (syncGoogle && googleConnected && eventId) {
-      await syncEventToGoogle(eventId);
-    }
-    setBusy(false);
-    onSaved();
   };
 
   return (
@@ -511,7 +548,7 @@ function EventModal({
             confirmDelete ? (
               <div className="flex items-center gap-1.5">
                 <button onClick={() => setConfirmDelete(false)} className="text-xs px-3 py-1 rounded-lg border" style={{ borderColor: '#E5E7EB', color: '#6B7280' }}>Cancel</button>
-                <button onClick={() => { deleteEvent(existing.id); onDeleted(); }}
+                <button onClick={async () => { try { await deleteEvent(existing.id); } catch (e) { console.error(e); } onDeleted(); }}
                   className="text-xs font-semibold px-3 py-1 rounded-lg text-white" style={{ background: '#DC2626' }}>Yes, delete</button>
               </div>
             ) : (
@@ -557,12 +594,12 @@ function ConnectGoogleModal({
   const connect = async () => {
     if (!pickedEmail.trim()) return;
     setBusy(true);
-    await connectGoogleMock(pickedEmail.trim());
+    try { await connectMock({ calendar: true }); } catch (e) { console.error(e); }
     setBusy(false);
     onChanged();
   };
-  const disconnect = () => {
-    disconnectGoogle();
+  const disconnect = async () => {
+    try { await disconnectGoogle(); } catch (e) { console.error(e); }
     onChanged();
   };
 

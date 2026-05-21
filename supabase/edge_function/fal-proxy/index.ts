@@ -7,14 +7,13 @@
 //
 // Only `*.fal.ai`, `*.fal.run`, and `*.fal.media` targets are allowed so this
 // proxy can't be turned into a generic open relay.
+//
+// verify_jwt is ENABLED — the function platform rejects unauthenticated calls
+// before this code runs. The browser supabase client attaches the user's JWT
+// automatically on `supabase.functions.invoke('fal-proxy', ...)`.
 
-// Allow bare hosts (`fal.run`) and any subdomain (`*.fal.run`, `queue.fal.run`,
-// `rest.fal.ai`, `v3.fal.media`, …). Reject everything else.
 const ALLOWED_DOMAINS = ["fal.ai", "fal.run", "fal.media"];
 
-// Response headers we MUST drop before forwarding upstream → browser:
-// content-encoding/length/transfer-encoding because Deno fetch auto-decompresses
-// and the cached values would mismatch the actual body; connection is hop-by-hop.
 const STRIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
   "content-length",
@@ -23,10 +22,6 @@ const STRIP_RESPONSE_HEADERS = new Set([
   "keep-alive",
 ]);
 
-// Wildcard for both Allow-Headers and Expose-Headers — fal client v1.10 sends
-// custom request headers (x-fal-queue-priority, x-fal-runner-region, …) that
-// we don't want to enumerate. Any header is fine since this proxy only forwards
-// to allow-listed fal hosts.
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
@@ -73,7 +68,6 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Strip hop-by-hop / Supabase-injected headers and inject fal auth.
   const headers = new Headers();
   for (const [k, v] of req.headers.entries()) {
     const lower = k.toLowerCase();
@@ -95,7 +89,6 @@ Deno.serve(async (req) => {
     headers,
   };
   if (req.method !== "GET" && req.method !== "HEAD") {
-    // Buffer the body so fetch can compute Content-Length cleanly when needed.
     init.body = await req.arrayBuffer();
   }
 
@@ -109,9 +102,6 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Forward upstream response, dropping headers that would confuse the browser
-  // after Deno auto-decompressed the body, and enforcing CORS so the browser
-  // can read it.
   const respHeaders = new Headers();
   for (const [k, v] of upstream.headers.entries()) {
     if (STRIP_RESPONSE_HEADERS.has(k.toLowerCase())) continue;

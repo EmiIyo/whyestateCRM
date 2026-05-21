@@ -1,16 +1,28 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   Folder as FolderIcon, FolderPlus, Upload, Search, ChevronRight, Home, Trash2,
   Pencil, MoreHorizontal, X, Check, Loader2, AlertCircle, FileText, Image as ImageIcon,
   Grid3x3, List, Mail, Link as LinkIcon,
 } from 'lucide-react';
 import {
-  listItems, createFolder, addFile, renameItem, deleteItem, syncItemToGoogleDrive,
-  getDriveGoogleState, connectGoogleDriveMock, disconnectGoogleDrive,
-  ancestorChain, fileKindOf, formatBytes, fmtDate,
-  type DriveItem, type DriveGoogleState,
-} from '@/lib/drive';
+  listItems, createFolder, addFile, renameItem, deleteItem,
+  ancestorChain, fileKindOf, formatBytes, fmtDate, getDownloadUrl,
+  type DriveItem,
+} from '@/api/drive';
+import { getMyConnection, connectMock, disconnect as disconnectGoogleApi, type GoogleConnection } from '@/api/google';
 import { getCurrentUser } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
+
+// Compatibility shape — mirrors the old DriveGoogleState exposed by lib/drive.
+interface DriveGoogleState {
+  connected: boolean;
+  email?: string;
+  connectedAt?: string;
+}
+function toGoogleState(c: GoogleConnection | null): DriveGoogleState {
+  if (!c) return { connected: false };
+  return { connected: c.drive_connected, email: c.email, connectedAt: c.connected_at };
+}
 
 type ViewMode = 'grid' | 'list';
 
@@ -18,7 +30,6 @@ export default function DocumentsPage() {
   const me = getCurrentUser();
   const myEmail = me?.email ?? '';
 
-  const [tick, setTick]               = useState(0);
   const [currentFolder, setCurrent]   = useState<string | null>(null);
   const [view, setView]               = useState<ViewMode>('grid');
   const [query, setQuery]             = useState('');
@@ -28,9 +39,25 @@ export default function DocumentsPage() {
   const [error, setError]             = useState<string | null>(null);
   const [busy, setBusy]               = useState(false);
 
-  const items  = useMemo(() => listItems(), [tick]);
-  const google = useMemo<DriveGoogleState>(() => getDriveGoogleState(), [tick]);
-  const refresh = () => setTick((t) => t + 1);
+  const [items, setItems]   = useState<DriveItem[]>([]);
+  const [google, setGoogle] = useState<DriveGoogleState>({ connected: false });
+
+  const refresh = useCallback(async () => {
+    try {
+      const [its, conn] = await Promise.all([listItems(), getMyConnection()]);
+      setItems(its);
+      setGoogle(toGoogleState(conn));
+    } catch (e) { console.error('drive refresh failed', e); }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    const ch = supabase.channel('drive-page')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'drive_items' }, () => void refresh())
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [refresh]);
 
   const breadcrumb = useMemo(() => ancestorChain(items, currentFolder), [items, currentFolder]);
 
@@ -52,38 +79,45 @@ export default function DocumentsPage() {
     setBusy(true);
     try {
       for (const f of Array.from(files)) {
-        await addFile(f, currentFolder, myEmail);
+        await addFile(f, currentFolder);
       }
-      refresh();
+      await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not upload file.');
     }
     setBusy(false);
   };
 
-  const onNewFolder = () => {
+  const onNewFolder = async () => {
     const name = window.prompt('Folder name');
     if (!name?.trim()) return;
     try {
-      createFolder(name.trim(), currentFolder, myEmail);
-      refresh();
+      await createFolder(name.trim(), currentFolder);
+      await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create folder.');
     }
   };
 
-  const handleSync = async (id: string) => {
+  const handleSync = async (_id: string) => {
     if (!google.connected) { setShowConnect(true); return; }
-    await syncItemToGoogleDrive(id);
-    refresh();
+    // Real Google Drive sync wiring lands in a follow-up sprint; the metadata
+    // column exists and the bucket is configured.
+    setError('Google Drive sync will be available once OAuth wiring lands.');
   };
 
-  const downloadFile = (it: DriveItem) => {
-    if (!it.dataUrl) return;
-    const a = document.createElement('a');
-    a.href = it.dataUrl;
-    a.download = it.name;
-    a.click();
+  const downloadFile = async (it: DriveItem) => {
+    try {
+      const url = await getDownloadUrl(it);
+      if (!url) return;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = it.name;
+      a.target = '_blank';
+      a.click();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not download file.');
+    }
   };
 
   const openFolder = (id: string) => { setCurrent(id); setQuery(''); };
@@ -217,17 +251,17 @@ export default function DocumentsPage() {
       {renaming && (
         <RenameModal item={renaming}
           onClose={() => setRenaming(null)}
-          onSaved={() => { setRenaming(null); refresh(); }} />
+          onSaved={() => { setRenaming(null); void refresh(); }} />
       )}
       {confirmDelete && (
         <ConfirmDeleteModal item={confirmDelete}
           onClose={() => setConfirmDelete(null)}
-          onConfirm={() => { deleteItem(confirmDelete.id); setConfirmDelete(null); refresh(); }} />
+          onConfirm={async () => { try { await deleteItem(confirmDelete.id); } catch (e) { console.error(e); } setConfirmDelete(null); await refresh(); }} />
       )}
       {showConnect && (
         <ConnectDriveModal google={google} email={myEmail}
           onClose={() => setShowConnect(false)}
-          onChanged={() => { setShowConnect(false); refresh(); }} />
+          onChanged={() => { setShowConnect(false); void refresh(); }} />
       )}
     </div>
   );
@@ -277,8 +311,13 @@ function ItemCard({ item, onOpen, onRename, onDelete, onSync, onDownload, google
         style={{ background: item.kind === 'folder' ? '#F0FBFA' : isImage ? 'white' : kind.color + '11' }}>
         {item.kind === 'folder' ? (
           <FolderIcon size={44} style={{ color: '#0F766E' }} strokeWidth={1.5} />
-        ) : isImage && item.dataUrl ? (
-          <img src={item.dataUrl} alt={item.name} className="w-full h-full object-cover" />
+        ) : isImage ? (
+          <div className="flex flex-col items-center">
+            <div className="w-12 h-14 rounded-lg flex items-center justify-center" style={{ background: kind.color + '22' }}>
+              <ImageIcon size={22} style={{ color: kind.color }} strokeWidth={1.5} />
+            </div>
+            <span className="mt-2 text-[10px] font-bold uppercase tracking-wider" style={{ color: kind.color }}>{kind.label}</span>
+          </div>
         ) : (
           <div className="flex flex-col items-center">
             <div className="w-12 h-14 rounded-lg flex items-center justify-center" style={{ background: kind.color + '22' }}>
@@ -339,8 +378,8 @@ function ListView({ items, onOpen, onRename, onDelete, onSync, onDownload, googl
                     style={{ background: it.kind === 'folder' ? '#F0FBFA' : kind.color + '22' }}>
                     {it.kind === 'folder' ? (
                       <FolderIcon size={16} style={{ color: '#0F766E' }} />
-                    ) : isImage && it.dataUrl ? (
-                      <img src={it.dataUrl} alt="" className="w-full h-full object-cover" />
+                    ) : isImage ? (
+                      <ImageIcon size={14} style={{ color: kind.color }} />
                     ) : (
                       <FileText size={14} style={{ color: kind.color }} />
                     )}
@@ -401,7 +440,7 @@ function ItemMenu({ item, onOpen, onRename, onDelete, onSync, onDownload, google
           style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}>
           <MenuButton icon={item.kind === 'folder' ? <FolderIcon size={12} /> : <ImageIcon size={12} />}
             label={item.kind === 'folder' ? 'Open' : 'Download'}
-            onClick={() => { setOpen(false); item.kind === 'folder' ? onOpen() : onDownload(); }} />
+            onClick={() => { setOpen(false); if (item.kind === 'folder') onOpen(); else onDownload(); }} />
           {item.kind === 'file' && (
             <MenuButton icon={<GoogleDot small />}
               label={item.googleDriveId ? 'Re-sync to Drive' : 'Sync to Drive'}
@@ -474,10 +513,10 @@ function RenameModal({ item, onClose, onSaved }: { item: DriveItem; onClose: () 
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
 
-  const submit = () => {
+  const submit = async () => {
     const v = name.trim();
     if (!v || v === item.name) { onClose(); return; }
-    renameItem(item.id, v);
+    try { await renameItem(item.id, v); } catch (e) { console.error(e); }
     onSaved();
   };
 
@@ -563,11 +602,14 @@ function ConnectDriveModal({ google, email, onClose, onChanged }: {
   const connect = async () => {
     if (!pickedEmail.trim()) return;
     setBusy(true);
-    await connectGoogleDriveMock(pickedEmail.trim());
+    try { await connectMock({ drive: true }); } catch (e) { console.error(e); }
     setBusy(false);
     onChanged();
   };
-  const disconnect = () => { disconnectGoogleDrive(); onChanged(); };
+  const disconnect = async () => {
+    try { await disconnectGoogleApi(); } catch (e) { console.error(e); }
+    onChanged();
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
