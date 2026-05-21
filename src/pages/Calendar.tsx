@@ -11,6 +11,8 @@ import {
 import { getMyConnection, connectMock, disconnect as disconnectGoogle, type GoogleConnection } from '@/api/google';
 import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
+import { notifyComingSoon, notifyError, notifySuccess } from '@/lib/notify';
+import { listBoards } from '@/api/boards';
 
 // Compatibility shape — mirrors the old GoogleState exposed by lib/calendar.
 interface GoogleState {
@@ -34,7 +36,6 @@ export default function CalendarPage() {
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [editingEvent, setEditingEvent] = useState<CalEvent | null>(null);
   const [newEventSeed, setNewEventSeed] = useState<{ start: Date } | null>(null);
-  const [showConnect, setShowConnect]   = useState(false);
 
   const [events, setEvents] = useState<CalEvent[]>([]);
   const [google, setGoogle] = useState<GoogleState>({ connected: false });
@@ -96,13 +97,13 @@ export default function CalendarPage() {
           </div>
           <div className="flex items-center gap-2">
             {google.connected ? (
-              <button onClick={() => setShowConnect(true)}
+              <button onClick={() => notifyComingSoon('Google Calendar sync')}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors hover:bg-gray-50"
                 style={{ borderColor: '#D1F2EF', color: '#0F766E', background: '#F0FBFA' }}>
                 <GoogleDot /> Connected · {google.email}
               </button>
             ) : (
-              <button onClick={() => setShowConnect(true)}
+              <button onClick={() => notifyComingSoon('Google Calendar sync')}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors hover:border-[#1EC9C4] hover:text-[#1EC9C4]"
                 style={{ borderColor: '#E5E7EB', color: '#374151', background: 'white' }}>
                 <GoogleDot /> Connect Google Calendar
@@ -142,6 +143,18 @@ export default function CalendarPage() {
           </div>
         </div>
 
+        {events.length === 0 && (
+          <div className="mb-3 rounded-2xl border px-4 py-3 flex items-center gap-3"
+            style={{ borderColor: '#D1F2EF', background: '#F0FBFA' }}>
+            <CalendarIcon size={18} style={{ color: '#0F766E' }} />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold" style={{ color: '#0F766E' }}>No events yet</p>
+              <p className="text-[11px]" style={{ color: '#0F766E', opacity: 0.85 }}>
+                Click <strong>New Event</strong> above, or double-click any day in the grid to schedule one.
+              </p>
+            </div>
+          </div>
+        )}
         {view === 'month' ? (
           <MonthGrid
             days={days}
@@ -168,14 +181,8 @@ export default function CalendarPage() {
           onDeleted={() => { setEditingEvent(null); void refresh(); }}
         />
       )}
-      {showConnect && (
-        <ConnectGoogleModal
-          google={google}
-          email={myEmail}
-          onClose={() => setShowConnect(false)}
-          onChanged={() => { setShowConnect(false); void refresh(); }}
-        />
-      )}
+      {/* ConnectGoogleModal kept in source for the day real OAuth lands —
+          right now the Google buttons fire a coming-soon toast instead. */}
     </div>
   );
 }
@@ -377,7 +384,6 @@ function EventModal({
     if (new Date(endIso) <= new Date(startIso)) { setError('End must be after start.'); return; }
     setBusy(true);
     try {
-      let eventId = existing?.id;
       if (existing) {
         await updateEvent(existing.id, {
           title: title.trim(), start: startIso, end: endIso,
@@ -389,8 +395,9 @@ function EventModal({
           color,
           allDay: false,
         });
+        notifySuccess('Event updated');
       } else {
-        const created = await createEvent({
+        await createEvent({
           title: title.trim(), start: startIso, end: endIso,
           location: location.trim() || null,
           notes: notes.trim() || null,
@@ -400,14 +407,16 @@ function EventModal({
           color,
           allDay: false,
         });
-        eventId = created.id;
+        notifySuccess('Event created');
       }
-      if (syncGoogle && googleConnected && eventId) {
-        await syncEventToGoogle(eventId);
+      if (syncGoogle && googleConnected) {
+        notifyComingSoon('Google Calendar sync');
       }
       onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed');
+      const msg = err instanceof Error ? err.message : 'Save failed';
+      setError(msg);
+      notifyError('Could not save the event', err);
     } finally {
       setBusy(false);
     }
@@ -548,7 +557,15 @@ function EventModal({
             confirmDelete ? (
               <div className="flex items-center gap-1.5">
                 <button onClick={() => setConfirmDelete(false)} className="text-xs px-3 py-1 rounded-lg border" style={{ borderColor: '#E5E7EB', color: '#6B7280' }}>Cancel</button>
-                <button onClick={async () => { try { await deleteEvent(existing.id); } catch (e) { console.error(e); } onDeleted(); }}
+                <button onClick={async () => {
+                  try {
+                    await deleteEvent(existing.id);
+                    notifySuccess('Event deleted');
+                  } catch (e) {
+                    notifyError('Could not delete the event', e);
+                  }
+                  onDeleted();
+                }}
                   className="text-xs font-semibold px-3 py-1 rounded-lg text-white" style={{ background: '#DC2626' }}>Yes, delete</button>
               </div>
             ) : (
@@ -574,106 +591,9 @@ function EventModal({
   );
 }
 
-// ─── Connect Google Calendar modal ──────────────────────────────────────────
-function ConnectGoogleModal({
-  google, email, onClose, onChanged,
-}: {
-  google: GoogleState;
-  email: string;
-  onClose: () => void;
-  onChanged: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [pickedEmail, setPickedEmail] = useState(email || '');
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', h);
-    return () => document.removeEventListener('keydown', h);
-  }, [onClose]);
-
-  const connect = async () => {
-    if (!pickedEmail.trim()) return;
-    setBusy(true);
-    try { await connectMock({ calendar: true }); } catch (e) { console.error(e); }
-    setBusy(false);
-    onChanged();
-  };
-  const disconnect = async () => {
-    try { await disconnectGoogle(); } catch (e) { console.error(e); }
-    onChanged();
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
-      <div className="bg-white rounded-2xl w-[460px] overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
-        <div className="flex items-start justify-between px-6 pt-5 pb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: 'white', border: '1px solid #F1F5F9' }}>
-              <GoogleDot />
-            </div>
-            <div>
-              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Google Calendar</h3>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
-                {google.connected ? `Connected as ${google.email}` : 'Sign in to sync events both ways'}
-              </p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
-        </div>
-
-        <div className="px-6 pb-5 space-y-4">
-          {google.connected ? (
-            <>
-              <div className="rounded-xl border px-3 py-3 flex items-center gap-3" style={{ borderColor: '#D1F2EF', background: '#F0FBFA' }}>
-                <Check size={16} className="text-[#0F766E] flex-shrink-0" strokeWidth={3} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold truncate" style={{ color: '#0F766E' }}>{google.email}</p>
-                  <p className="text-[11px] truncate" style={{ color: '#0F766E', opacity: 0.7 }}>
-                    Connected {google.connectedAt ? new Date(google.connectedAt).toLocaleDateString('en-MY') : ''}
-                  </p>
-                </div>
-              </div>
-              <p className="text-[11px]" style={{ color: '#6B7280' }}>
-                New events have a <strong>Sync to Google Calendar</strong> toggle. Disconnecting won't delete already-synced events on either side.
-              </p>
-            </>
-          ) : (
-            <>
-              <Field label="Google account email" icon={<Mail size={12} />}>
-                <input value={pickedEmail} onChange={(e) => setPickedEmail(e.target.value)}
-                  placeholder="you@gmail.com" type="email"
-                  className="w-full pl-8 pr-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-                  style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-              </Field>
-              <div className="rounded-xl border px-3 py-2.5 text-[11px] leading-relaxed" style={{ borderColor: '#FEF3C7', background: '#FFFBEB', color: '#78350F' }}>
-                <p className="font-semibold mb-1 flex items-center gap-1"><LinkIcon size={11} /> Local-mode mock</p>
-                A real OAuth popup will open here once the Google API client ID is set. For now this connects locally so the rest of the calendar UI works end-to-end.
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
-          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Close</button>
-          {google.connected ? (
-            <button onClick={disconnect}
-              className="px-5 py-1.5 rounded-xl text-sm font-semibold border hover:bg-red-50"
-              style={{ borderColor: '#FECACA', color: '#DC2626' }}>
-              Disconnect
-            </button>
-          ) : (
-            <button onClick={connect} disabled={busy || !pickedEmail.trim()}
-              className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
-              style={{ background: '#1EC9C4' }}>
-              {busy ? <Loader2 size={13} className="animate-spin" /> : <GoogleDot small inverted />}
-              Sign in with Google
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+// ConnectGoogleModal removed — Google Calendar integration now fires a
+// "coming soon" toast directly from the connect button. The real OAuth modal
+// will live here once the Calendar API client id is provisioned.
 
 // ─── Title picker — preset appointment types + free text ───────────────────
 function TitlePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -789,9 +709,9 @@ function LocationPicker({ value, onChange }: { value: string; onChange: (v: stri
 
   useEffect(() => {
     let alive = true;
-    void import('@/api/boards').then(({ listBoards }) => listBoards())
+    listBoards()
       .then((rows) => { if (alive) setBoards(rows.map((b) => ({ id: b.id, name: b.name, location: b.location, color: b.color }))); })
-      .catch(() => {});
+      .catch(() => { /* picker just stays empty */ });
     return () => { alive = false; };
   }, []);
 

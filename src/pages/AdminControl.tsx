@@ -18,6 +18,8 @@ import { loadRolePerms, saveRolePerms as saveRolePermsApi } from '@/api/permissi
 import { adminUpdateProfile, adminSetUserTier, deleteUser } from '@/api/profiles';
 import { createInvite, listInvites, revokeInvite, type Invite } from '@/api/invites';
 import { supabase } from '@/lib/supabase';
+import { confirm } from '@/components/ConfirmDialog';
+import { notifySuccess, notifyError } from '@/lib/notify';
 
 type Section = 'main' | 'prospect-hub' | 'user-setting';
 
@@ -163,13 +165,13 @@ function UsersTable() {
 
   const handleRoleChange = async (email: string, role: Role) => {
     try { await setUserRole(email, role); await refreshDirectory(); setTick((t) => t + 1); }
-    catch (e) { console.error('setUserRole failed', e); }
+    catch (e) { notifyError('Could not change role', e); }
   };
   const handleTierChange = async (email: string, tier: UserTier) => {
     const id = profileIdFor(email);
     if (!id) return;
     try { await adminSetUserTier(id, tier); await refreshDirectory(); setTick((t) => t + 1); }
-    catch (e) { console.error('setUserTier failed', e); }
+    catch (e) { notifyError('Could not change tier', e); }
   };
 
   const startEdit = (u: DirectoryUser) => { setEditingEmail(u.email); setDraftName(u.name || ''); };
@@ -184,18 +186,30 @@ function UsersTable() {
           await refreshDirectory();
         }
         setTick((t) => t + 1);
-      } catch (e) { console.error('rename user failed', e); }
+      } catch (e) { notifyError('Could not rename user', e); }
     }
     setEditingEmail(null);
     setDraftName('');
   };
 
   const handleRemove = async (u: DirectoryUser) => {
-    if (!window.confirm(`Permanently remove ${u.email}? Their boards, clients, and files will be deleted (cascades through FKs).`)) return;
+    const ok = await confirm({
+      title: `Remove ${u.name || u.email}?`,
+      description: `Their boards, clients, calendar events, and files will be permanently deleted. This cannot be undone.`,
+      confirmLabel: 'Remove user',
+      destructive: true,
+    });
+    if (!ok) return;
     const id = profileIdFor(u.email);
     if (!id) return;
-    try { await deleteUser(id); await refreshDirectory(); setTick((t) => t + 1); }
-    catch (e) { console.error('deleteUser failed', e); alert((e as Error).message); }
+    try {
+      await deleteUser(id);
+      await refreshDirectory();
+      setTick((t) => t + 1);
+      notifySuccess(`${u.name || u.email} removed`);
+    } catch (e) {
+      notifyError('Could not remove user', e);
+    }
   };
 
   return (
@@ -608,7 +622,7 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
       if (!alive) return;
       setPerms(p); setSaved(p); setLoading(false);
     }).catch((e) => {
-      console.error('loadRolePerms', e); setLoading(false);
+      notifyError('Could not load permissions', e); setLoading(false);
     });
     return () => { alive = false; };
   }, []);
@@ -637,17 +651,25 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
         saveRolePermsApi('viewer', perms.viewer),
       ]);
       setSaved(perms);
-    } catch (e) { console.error('saveRolePerms', e); }
+      notifySuccess('Permissions saved');
+    } catch (e) { notifyError('Could not save permissions', e); }
   };
 
   const reset = async () => {
-    if (!window.confirm('Reset all role permissions back to their factory defaults?')) return;
+    const ok = await confirm({
+      title: 'Reset role permissions?',
+      description: 'Admin, Editor and Viewer permissions revert to factory defaults. Custom changes you made will be lost.',
+      confirmLabel: 'Reset',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await resetRolePerms();
       const fresh = await loadRolePerms();
       setPerms(fresh);
       setSaved(fresh);
-    } catch (e) { console.error('resetRolePerms', e); }
+      notifySuccess('Permissions reset to defaults');
+    } catch (e) { notifyError('Could not reset permissions', e); }
   };
 
   if (loading) {

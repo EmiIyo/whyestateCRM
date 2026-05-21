@@ -141,20 +141,39 @@ export async function setUserRole(email: string, role: AppRole): Promise<void> {
 }
 
 // ─── "View as" preview (master admin only) ──────────────────────────────
+// Stored in sessionStorage so it's per-tab, but also mirrored into a zustand
+// store so components can subscribe and re-render without `window.location.reload()`.
 const VIEW_AS_KEY = 'we.view_as_role';
 
-export function getViewAsRole(): AppRole | null {
+interface ViewAsState {
+  role: AppRole | null;
+  set: (r: AppRole | null) => void;
+}
+
+function loadInitialViewAs(): AppRole | null {
   try {
     const raw = sessionStorage.getItem(VIEW_AS_KEY);
     if (!raw) return null;
     return (ROLES.some((r) => r.id === raw) ? raw as AppRole : null);
   } catch { return null; }
 }
+
+export const useViewAsStore = create<ViewAsState>((set) => ({
+  role: loadInitialViewAs(),
+  set: (role) => {
+    try {
+      if (role) sessionStorage.setItem(VIEW_AS_KEY, role);
+      else sessionStorage.removeItem(VIEW_AS_KEY);
+    } catch { /* ignore */ }
+    set({ role });
+  },
+}));
+
+export function getViewAsRole(): AppRole | null {
+  return useViewAsStore.getState().role;
+}
 export function setViewAsRole(role: AppRole | null): void {
-  try {
-    if (role) sessionStorage.setItem(VIEW_AS_KEY, role);
-    else sessionStorage.removeItem(VIEW_AS_KEY);
-  } catch { /* ignore */ }
+  useViewAsStore.getState().set(role);
 }
 
 // ─── Realtime subscription (so admin matrix edits propagate live) ───────

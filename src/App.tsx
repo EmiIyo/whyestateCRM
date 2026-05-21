@@ -6,6 +6,8 @@ import { HashRouter, Routes, Route } from "react-router-dom";
 import { ROUTE_PATHS } from "@/lib/index";
 import Layout from "@/components/Layout";
 import RequireAuth from "@/components/RequireAuth";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ConfirmHost } from "@/components/ConfirmDialog";
 import Landing from "@/pages/Landing";
 import ProspectHub from "@/pages/ProspectHub";
 import AdminControl from "@/pages/AdminControl";
@@ -14,31 +16,30 @@ import CalendarPage from "@/pages/Calendar";
 import DocumentsPage from "@/pages/Documents";
 import ClientsPage from "@/pages/Clients";
 import Dashboard from "@/pages/Dashboard";
-import Listings from "@/pages/Listings";
-import Tenancy from "@/pages/Tenancy";
-import Reports from "@/pages/Reports";
 import UnderDevelopment from "@/pages/UnderDevelopment";
 import NotFound from "./pages/not-found/Index";
 
 const queryClient = new QueryClient();
 
 const App = () => (
+  <ErrorBoundary>
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
-      <Sonner />
+      <Sonner position="top-right" richColors closeButton />
+      <ConfirmHost />
       <HashRouter>
         <Routes>
           <Route path={ROUTE_PATHS.HOME} element={<Landing />} />
 
           <Route path={ROUTE_PATHS.LEADS}      element={<RequireAuth><Layout><ProspectHub /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.DASHBOARD}  element={<RequireAuth><Layout><Dashboard /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.LISTINGS}   element={<RequireAuth><Layout><Listings /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.LISTINGS}   element={<RequireAuth><Layout><UnderDevelopment name="Properties" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.CONTACTS}   element={<RequireAuth><Layout><ClientsPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.CLIENTS}    element={<RequireAuth><Layout><ClientsPage /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.TENANCY}    element={<RequireAuth><Layout><Tenancy /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.TENANCY}    element={<RequireAuth><Layout><UnderDevelopment name="Tenancy" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth><Layout><CalendarPage /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.REPORTS}    element={<RequireAuth><Layout><Reports /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.REPORTS}    element={<RequireAuth><Layout><UnderDevelopment name="Reports" /></Layout></RequireAuth>} />
           {/* Deals + Commission are placeholder modules — no UI shipped yet */}
           <Route path={ROUTE_PATHS.DEALS}      element={<RequireAuth><Layout><UnderDevelopment name="Deals" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.COMMISSION} element={<RequireAuth><Layout><UnderDevelopment name="Commission" /></Layout></RequireAuth>} />
@@ -51,6 +52,7 @@ const App = () => (
       </HashRouter>
     </TooltipProvider>
   </QueryClientProvider>
+  </ErrorBoundary>
 );
 
 export default App;

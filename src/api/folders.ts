@@ -64,8 +64,11 @@ export async function deleteFolder(id: string): Promise<void> {
 }
 
 export async function reorderFolders(orderedIds: string[]): Promise<void> {
-  for (let i = 0; i < orderedIds.length; i++) {
-    const { error } = await supabase.from('folders').update({ position: i }).eq('id', orderedIds[i]);
-    if (error) throw error;
-  }
+  const { error } = await (supabase.rpc as unknown as (
+    fn: string, args: { p_ids: string[] }
+  ) => Promise<{ error: { message: string } | null }>)(
+    'reorder_folders',
+    { p_ids: orderedIds },
+  );
+  if (error) throw new Error(error.message);
 }

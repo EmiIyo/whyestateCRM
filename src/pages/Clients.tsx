@@ -12,6 +12,7 @@ import {
   type Client, type ClientStage, type ClientType, type ClientTask, type TaskPriority,
 } from '@/api/clients';
 import { supabase } from '@/lib/supabase';
+import { notifySuccess, notifyError } from '@/lib/notify';
 
 type ViewMode = 'tasks' | 'kanban' | 'list';
 
@@ -26,7 +27,7 @@ export default function ClientsPage() {
 
   const refresh = useCallback(async () => {
     try { setClients(await listClients()); }
-    catch (e) { console.error('listClients failed', e); }
+    catch (e) { notifyError('Could not load clients', e); }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -168,20 +169,39 @@ export default function ClientsPage() {
             today={todayItems}
             upcoming={upcomingItems}
             onOpenClient={(c) => setEditing(c)}
-            onToggleTask={async (taskId, currentDone) => { await toggleTask(taskId, !currentDone); await refresh(); }}
+            onToggleTask={async (taskId, currentDone) => {
+              try { await toggleTask(taskId, !currentDone); await refresh(); }
+              catch (e) { notifyError('Could not update task', e); }
+            }}
           />
         ) : view === 'kanban' ? (
           <KanbanBoard
             clients={filtered}
             onOpenClient={(c) => setEditing(c)}
-            onStageChange={async (c, stage) => { await updateClient(c.id, { stage }); await refresh(); }}
+            onStageChange={async (c, stage) => {
+              // Optimistic: paint the new stage immediately so the card doesn't
+              // snap back to the source column while we wait on the server.
+              const prev = c.stage;
+              setClients((rows) => rows.map((r) => r.id === c.id ? { ...r, stage } : r));
+              try {
+                await updateClient(c.id, { stage });
+                notifySuccess(`${c.name} → ${stage}`);
+              } catch (e) {
+                // Roll back the optimistic stage on failure.
+                setClients((rows) => rows.map((r) => r.id === c.id ? { ...r, stage: prev } : r));
+                notifyError('Could not update stage', e);
+              }
+            }}
           />
         ) : (
           <ListView
             clients={filtered}
             onOpenClient={(c) => setEditing(c)}
             onDelete={(c) => setConfirmDelete(c)}
-            onConvert={async (c) => { await convertToListing(c.id); await refresh(); }}
+            onConvert={async (c) => {
+              try { await convertToListing(c.id); await refresh(); notifySuccess(`${c.name} converted to listing`); }
+              catch (e) { notifyError('Could not convert client', e); }
+            }}
           />
         )}
       </div>
@@ -193,38 +213,43 @@ export default function ClientsPage() {
           onClose={() => { setCreating(false); setEditing(null); }}
           onSave={async (patch) => {
             try {
-              if (editing) await updateClient(editing.id, patch);
-              else await createClient({
-                name: patch.name ?? '', phone: patch.phone ?? '', email: patch.email ?? '',
-                type: patch.type ?? 'Lead', stage: patch.stage ?? 'New', source: 'manual',
-                propertyInterest: patch.propertyInterest ?? '', budget: patch.budget ?? '',
-                lastContact: patch.lastContact ?? '', nextFollowUp: patch.nextFollowUp ?? '',
-                notes: patch.notes ?? '',
-              });
+              if (editing) {
+                await updateClient(editing.id, patch);
+                notifySuccess('Client updated');
+              } else {
+                await createClient({
+                  name: patch.name ?? '', phone: patch.phone ?? '', email: patch.email ?? '',
+                  type: patch.type ?? 'Lead', stage: patch.stage ?? 'New', source: 'manual',
+                  propertyInterest: patch.propertyInterest ?? '', budget: patch.budget ?? '',
+                  lastContact: patch.lastContact ?? '', nextFollowUp: patch.nextFollowUp ?? '',
+                  notes: patch.notes ?? '',
+                });
+                notifySuccess('Client created');
+              }
               setCreating(false); setEditing(null); await refresh();
-            } catch (e) { console.error('save client failed', e); }
+            } catch (e) { notifyError('Could not save client', e); }
           }}
           onAddTask={async (title, due, prio) => {
             if (!editing) return;
-            try { await addTask(editing.id, title, due, prio); await refresh(); }
-            catch (e) { console.error('addTask failed', e); }
+            try { await addTask(editing.id, title, due, prio); await refresh(); notifySuccess('Task added'); }
+            catch (e) { notifyError('Could not add task', e); }
           }}
           onToggleTask={async (taskId) => {
             if (!editing) return;
             const t = editing.tasks.find((x) => x.id === taskId);
             if (!t) return;
             try { await toggleTask(taskId, !t.done); await refresh(); }
-            catch (e) { console.error('toggleTask failed', e); }
+            catch (e) { notifyError('Could not update task', e); }
           }}
           onDeleteTask={async (taskId) => {
             if (!editing) return;
-            try { await deleteTask(taskId); await refresh(); }
-            catch (e) { console.error('deleteTask failed', e); }
+            try { await deleteTask(taskId); await refresh(); notifySuccess('Task removed'); }
+            catch (e) { notifyError('Could not delete task', e); }
           }}
           onConvert={async () => {
             if (!editing) return;
-            try { await convertToListing(editing.id); setEditing(null); await refresh(); }
-            catch (e) { console.error('convert failed', e); }
+            try { await convertToListing(editing.id); notifySuccess('Converted to listing'); setEditing(null); await refresh(); }
+            catch (e) { notifyError('Could not convert client', e); }
           }}
           onDelete={() => {
             if (!editing) return;
@@ -238,8 +263,14 @@ export default function ClientsPage() {
           name={confirmDelete.name}
           onCancel={() => setConfirmDelete(null)}
           onConfirm={async () => {
-            try { await deleteClient(confirmDelete.id); setConfirmDelete(null); await refresh(); }
-            catch (e) { console.error('deleteClient failed', e); }
+            try {
+              await deleteClient(confirmDelete.id);
+              notifySuccess('Client deleted');
+              setConfirmDelete(null);
+              await refresh();
+            } catch (e) {
+              notifyError('Could not delete client', e);
+            }
           }}
         />
       )}

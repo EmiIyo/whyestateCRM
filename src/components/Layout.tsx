@@ -528,17 +528,32 @@ function TopBar({
 }
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
-export default function Layout({ children }: { children: React.ReactNode }) {
-  const [sidebarState, setSidebarState] = useState<SidebarState>('expanded');
+const SIDEBAR_STORAGE_KEY = 'we.sidebar_state';
 
-  // Cycle: expanded → collapsed → expanded
-  // But from TopBar hamburger: hidden → expanded
+function loadSidebarState(): SidebarState {
+  if (typeof window === 'undefined') return 'expanded';
+  try {
+    const v = localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    if (v === 'collapsed' || v === 'expanded' || v === 'hidden') return v;
+  } catch { /* ignore */ }
+  return 'expanded';
+}
+
+export default function Layout({ children }: { children: React.ReactNode }) {
+  const [sidebarState, setSidebarState] = useState<SidebarState>(loadSidebarState);
+
+  // Persist sidebar preference across refreshes.
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_STORAGE_KEY, sidebarState); }
+    catch { /* ignore quota */ }
+  }, [sidebarState]);
+
+  // The previous cycle was expanded → collapsed → hidden, which surprised
+  // users — once hidden, the only way back was the topbar hamburger. The new
+  // cycle stays inside the two visible states (expanded ↔ collapsed); use
+  // the topbar hamburger to actually hide.
   const toggleSidebar = () => {
-    setSidebarState((s) => {
-      if (s === 'expanded') return 'collapsed';
-      if (s === 'collapsed') return 'hidden';
-      return 'expanded'; // hidden → expanded (shouldn't hit, handled by TopBar)
-    });
+    setSidebarState((s) => (s === 'expanded' ? 'collapsed' : 'expanded'));
   };
 
   const showSidebar = () => setSidebarState('expanded');

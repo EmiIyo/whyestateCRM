@@ -9,7 +9,8 @@ import {
   ancestorChain, fileKindOf, formatBytes, fmtDate, getDownloadUrl,
   type DriveItem,
 } from '@/api/drive';
-import { getMyConnection, connectMock, disconnect as disconnectGoogleApi, type GoogleConnection } from '@/api/google';
+import { getMyConnection, type GoogleConnection } from '@/api/google';
+import { notifyComingSoon, notifyError, notifySuccess } from '@/lib/notify';
 import { getCurrentUser } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 
@@ -33,7 +34,6 @@ export default function DocumentsPage() {
   const [currentFolder, setCurrent]   = useState<string | null>(null);
   const [view, setView]               = useState<ViewMode>('grid');
   const [query, setQuery]             = useState('');
-  const [showConnect, setShowConnect] = useState(false);
   const [renaming, setRenaming]       = useState<DriveItem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<DriveItem | null>(null);
   const [error, setError]             = useState<string | null>(null);
@@ -82,8 +82,10 @@ export default function DocumentsPage() {
         await addFile(f, currentFolder);
       }
       await refresh();
+      notifySuccess(files.length === 1 ? 'File uploaded' : `${files.length} files uploaded`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not upload file.');
+      notifyError('Upload failed', e);
     }
     setBusy(false);
   };
@@ -94,16 +96,15 @@ export default function DocumentsPage() {
     try {
       await createFolder(name.trim(), currentFolder);
       await refresh();
+      notifySuccess('Folder created');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create folder.');
+      notifyError('Could not create folder', e);
     }
   };
 
   const handleSync = async (_id: string) => {
-    if (!google.connected) { setShowConnect(true); return; }
-    // Real Google Drive sync wiring lands in a follow-up sprint; the metadata
-    // column exists and the bucket is configured.
-    setError('Google Drive sync will be available once OAuth wiring lands.');
+    notifyComingSoon('Google Drive sync');
   };
 
   const downloadFile = async (it: DriveItem) => {
@@ -116,7 +117,7 @@ export default function DocumentsPage() {
       a.target = '_blank';
       a.click();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not download file.');
+      notifyError('Could not download the file', e);
     }
   };
 
@@ -142,13 +143,13 @@ export default function DocumentsPage() {
           </div>
           <div className="flex items-center gap-2">
             {google.connected ? (
-              <button onClick={() => setShowConnect(true)}
+              <button onClick={() => notifyComingSoon('Google Drive sync')}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors hover:bg-gray-50"
                 style={{ borderColor: '#D1F2EF', color: '#0F766E', background: '#F0FBFA' }}>
                 <GoogleDot /> Connected · {google.email}
               </button>
             ) : (
-              <button onClick={() => setShowConnect(true)}
+              <button onClick={() => notifyComingSoon('Google Drive sync')}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors hover:border-[#1EC9C4] hover:text-[#1EC9C4]"
                 style={{ borderColor: '#E5E7EB', color: '#374151', background: 'white' }}>
                 <GoogleDot /> Connect Google Drive
@@ -251,18 +252,24 @@ export default function DocumentsPage() {
       {renaming && (
         <RenameModal item={renaming}
           onClose={() => setRenaming(null)}
-          onSaved={() => { setRenaming(null); void refresh(); }} />
+          onSaved={() => { setRenaming(null); void refresh(); notifySuccess('Renamed'); }} />
       )}
       {confirmDelete && (
         <ConfirmDeleteModal item={confirmDelete}
           onClose={() => setConfirmDelete(null)}
-          onConfirm={async () => { try { await deleteItem(confirmDelete.id); } catch (e) { console.error(e); } setConfirmDelete(null); await refresh(); }} />
+          onConfirm={async () => {
+            try {
+              await deleteItem(confirmDelete.id);
+              notifySuccess(confirmDelete.kind === 'folder' ? 'Folder deleted' : 'File deleted');
+            } catch (e) {
+              notifyError('Delete failed', e);
+            }
+            setConfirmDelete(null);
+            await refresh();
+          }} />
       )}
-      {showConnect && (
-        <ConnectDriveModal google={google} email={myEmail}
-          onClose={() => setShowConnect(false)}
-          onChanged={() => { setShowConnect(false); void refresh(); }} />
-      )}
+      {/* ConnectDriveModal kept for the day real OAuth lands — coming-soon
+          toast is fired instead from the connect buttons today. */}
     </div>
   );
 }
@@ -587,103 +594,9 @@ function ConfirmDeleteModal({ item, onClose, onConfirm }: { item: DriveItem; onC
   );
 }
 
-// ─── Connect Drive modal ─────────────────────────────────────────────────────
-function ConnectDriveModal({ google, email, onClose, onChanged }: {
-  google: DriveGoogleState; email: string; onClose: () => void; onChanged: () => void;
-}) {
-  const [pickedEmail, setPicked] = useState(google.email || email || '');
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', h);
-    return () => document.removeEventListener('keydown', h);
-  }, [onClose]);
-
-  const connect = async () => {
-    if (!pickedEmail.trim()) return;
-    setBusy(true);
-    try { await connectMock({ drive: true }); } catch (e) { console.error(e); }
-    setBusy(false);
-    onChanged();
-  };
-  const disconnect = async () => {
-    try { await disconnectGoogleApi(); } catch (e) { console.error(e); }
-    onChanged();
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
-      <div className="bg-white rounded-2xl w-[460px] overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
-        <div className="flex items-start justify-between px-6 pt-5 pb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: 'white', border: '1px solid #F1F5F9' }}>
-              <GoogleDot />
-            </div>
-            <div>
-              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Google Drive</h3>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
-                {google.connected ? `Connected as ${google.email}` : 'Sign in to back files up to Drive'}
-              </p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
-        </div>
-        <div className="px-6 pb-5 space-y-4">
-          {google.connected ? (
-            <>
-              <div className="rounded-xl border px-3 py-3 flex items-center gap-3" style={{ borderColor: '#D1F2EF', background: '#F0FBFA' }}>
-                <Check size={16} className="text-[#0F766E] flex-shrink-0" strokeWidth={3} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold truncate" style={{ color: '#0F766E' }}>{google.email}</p>
-                  <p className="text-[11px] truncate" style={{ color: '#0F766E', opacity: 0.7 }}>
-                    Connected {google.connectedAt ? fmtDate(google.connectedAt) : ''}
-                  </p>
-                </div>
-              </div>
-              <p className="text-[11px]" style={{ color: '#6B7280' }}>
-                Hover any file's <strong>⋯</strong> menu and choose <strong>Sync to Drive</strong> to push a copy. Disconnecting won't remove local or already-synced files.
-              </p>
-            </>
-          ) : (
-            <>
-              <div>
-                <label className="text-[11px] font-bold uppercase tracking-wider mb-1.5 block" style={{ color: '#6B7280' }}>Google account email</label>
-                <div className="relative">
-                  <Mail size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input value={pickedEmail} onChange={(e) => setPicked(e.target.value)}
-                    placeholder="you@gmail.com" type="email"
-                    className="w-full pl-8 pr-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-                    style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-                </div>
-              </div>
-              <div className="rounded-xl border px-3 py-2.5 text-[11px] leading-relaxed" style={{ borderColor: '#FEF3C7', background: '#FFFBEB', color: '#78350F' }}>
-                <p className="font-semibold mb-1 flex items-center gap-1"><LinkIcon size={11} /> Local-mode mock</p>
-                A real Google OAuth popup will open here once the Drive API client ID is set. For now this stub lets the rest of the UI work end-to-end.
-              </div>
-            </>
-          )}
-        </div>
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
-          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Close</button>
-          {google.connected ? (
-            <button onClick={disconnect}
-              className="px-5 py-1.5 rounded-xl text-sm font-semibold border hover:bg-red-50"
-              style={{ borderColor: '#FECACA', color: '#DC2626' }}>
-              Disconnect
-            </button>
-          ) : (
-            <button onClick={connect} disabled={busy || !pickedEmail.trim()}
-              className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50 flex items-center gap-1.5"
-              style={{ background: '#1EC9C4' }}>
-              {busy ? <Loader2 size={13} className="animate-spin" /> : <GoogleDot small inverted />}
-              Sign in with Google
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
+// ConnectDriveModal removed — Google Drive integration now fires a
+// "coming soon" toast directly from the connect button. The real OAuth modal
+// will live here once the Drive API client id is provisioned.
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function GoogleDot({ small = false, inverted = false }: { small?: boolean; inverted?: boolean }) {

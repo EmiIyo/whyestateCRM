@@ -21,6 +21,8 @@ import * as membersApi   from '@/api/members';
 import * as agentsApi    from '@/api/agent-presets';
 import * as recycleApi   from '@/api/recycle-bin';
 import type { Json } from '@/types/database';
+import { notifySuccess, notifyError } from '@/lib/notify';
+import { confirm } from '@/components/ConfirmDialog';
 
 // Tier display tones — mirror Admin Control's TIER_TONES so badges match
 // across User Setting, sidebar, topbar, and member lists.
@@ -55,14 +57,8 @@ const BOARD_COLORS = [
 ];
 
 
-const SEED_BOARDS_TEMPLATE: Omit<Board, 'ownerEmail' | 'ownerName' | 'folderId'>[] = [
-  { id: 'board_1', name: 'Millerz Square',   location: 'Old Klang Road',      color: '#F97316' },
-  { id: 'board_2', name: 'AKASA',            location: 'Cheras',              color: '#1EC9C4' },
-  { id: 'board_3', name: 'The Rainz',        location: 'Bukit Jalil',         color: '#8B5CF6' },
-  { id: 'board_4', name: 'Nidoz Residence',  location: 'Desa Petaling',       color: '#EF4444' },
-  { id: 'board_5', name: "D'Nuri",           location: 'Desa Petaling',       color: '#22C55E' },
-  { id: 'board_6', name: 'Solaris Parq',     location: 'Old Klang Road',      color: '#F59E0B' },
-];
+// (SEED_BOARDS_TEMPLATE removed — first-time bootstrap is now handled by
+// the live empty state, not a hard-coded six-board seed.)
 
 interface AgentPreset {
   id: string;
@@ -78,30 +74,8 @@ type RecycledItem =
   | { kind: 'folder';   id: string; deletedAt: string; deletedBy: string; payload: { folder: unknown; members: unknown } }
   | { kind: 'prospect'; id: string; deletedAt: string; deletedBy: string; payload: { boardId: string; prospect: unknown; customValues: unknown } };
 
-// Shared CRM data lives in localStorage so invitations work across users on the
-// same browser. (Same model translates 1:1 to Supabase RLS when wired.)
-const CRM_STORAGE_KEY = 'we.crm.state';
-interface CrmState {
-  boards:        Board[];
-  prospects:     Record<string, Prospect[]>;
-  members:       Record<string, BoardMember[]>;
-  folders?:      Folder[];
-  folderMembers?: Record<string, BoardMember[]>;
-  agents?:       AgentPreset[];
-  recycleBin?:   RecycledItem[];
-}
-function loadCrmState(): CrmState | null {
-  try {
-    const raw = localStorage.getItem(CRM_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as CrmState;
-    if (!parsed || !Array.isArray(parsed.boards)) return null;
-    return parsed;
-  } catch { return null; }
-}
-function saveCrmState(state: CrmState): void {
-  try { localStorage.setItem(CRM_STORAGE_KEY, JSON.stringify(state)); } catch { /* quota exceeded — silently drop */ }
-}
+// (Legacy localStorage `we.crm.state` blob is gone — every CRM mutation now
+// goes through `@/api/*` and Supabase handles persistence + realtime fanout.)
 
 // ─── Demo data generator (50 boards × 300 prospects) ────────────────────────
 const DEMO_PROJECT_NAMES = [
@@ -1198,23 +1172,28 @@ import {
 // Invite roles mirror the global RBAC roles defined in @/lib/permissions, minus
 // master_admin (which can't be granted via an invitation).
 import type { Role as AppRole } from '@/lib/permissions';
-import { ROLES as APP_ROLES, setUserRole as setUserRoleGlobal, getUserRole, canDo, getViewAsRole, setViewAsRole } from '@/lib/permissions';
+import { ROLES as APP_ROLES, setUserRole as setUserRoleGlobal, getUserRole, canDo, setViewAsRole, useViewAsStore } from '@/lib/permissions';
 
-const MASTER_ADMIN_EMAIL_PH = 'linux@whyestate.com';
-// Actual stored role — ignores any active "View as" override.
+// Resolution comes straight from the profiles directory in the auth store —
+// master_admin is determined server-side at signup-trigger time, so no email
+// hardcode is needed any more. Helpers below take an `email` and look up the
+// canonical role; the snapshot is reactive because `useAuthStore` callers
+// re-read the directory on every render.
+function isMasterEmail(email: string | undefined | null): boolean {
+  if (!email) return false;
+  return getUserRole(email) === 'master_admin';
+}
 function actualAppRole(email: string | undefined | null): AppRole {
   if (!email) return 'viewer';
-  if (email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return 'master_admin';
   return getUserRole(email);
 }
-// Effective role used for permission checks — only the real master admin
-// may downgrade their view; everyone else gets their stored role.
-function resolveAppRole(email: string | undefined | null): AppRole {
+// Effective role used for permission checks — the master admin can opt to
+// preview a lower role; everyone else gets their stored role unchanged.
+// NOTE: this needs to be called from a render path that subscribes to
+// `useViewAsStore` so re-renders fire on preview toggle.
+function resolveAppRole(email: string | undefined | null, override?: AppRole | null): AppRole {
   const real = actualAppRole(email);
-  if (real === 'master_admin') {
-    const override = getViewAsRole();
-    if (override) return override;
-  }
+  if (real === 'master_admin' && override) return override;
   return real;
 }
 type MemberRole = Exclude<AppRole, 'master_admin'>;
@@ -1351,7 +1330,8 @@ function ManageBoardModal({
   }, [board.id, board.name, board.location, board.color]);
 
   // Permission gates (driven by Admin Control → Prospect Hub Setting matrix)
-  const myRole       = resolveAppRole(getCurrentUser()?.email);
+  const viewAsOverride = useViewAsStore((s) => s.role);
+  const myRole       = resolveAppRole(getCurrentUser()?.email, viewAsOverride);
   const canInvite    = canDo(myRole, 'boards.invite_members');
   const canRemoveMem = canDo(myRole, 'boards.remove_members');
   const canEdit      = canDo(myRole, 'boards.edit');
@@ -1510,7 +1490,7 @@ function ManageBoardModal({
                             </span>
                           );
                         })()}
-                        {canRemoveMem && m.email.toLowerCase() !== MASTER_ADMIN_EMAIL_PH && (
+                        {canRemoveMem && !isMasterEmail(m.email) && (
                           <button onClick={() => onRemoveMember(m.id)}
                             className="p-1.5 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0"
                             title="Remove member">
@@ -1714,7 +1694,7 @@ function ManageFolderModal({
                         </div>
                         <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md flex-shrink-0"
                           style={{ background: tone.bg, color: tone.text }}>{label}</span>
-                        {canRemoveMembers && m.email.toLowerCase() !== MASTER_ADMIN_EMAIL_PH && (
+                        {canRemoveMembers && !isMasterEmail(m.email) && (
                           <button onClick={() => onRemoveMember(m.id)}
                             className="p-1.5 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0"
                             title="Remove member">
@@ -3416,7 +3396,8 @@ export default function ProspectHub() {
   const myEmail = (me?.email ?? '').toLowerCase();
   const OWNER_NAME  = me?.name  || 'LinuxLin';
   const OWNER_EMAIL = me?.email || 'unknown@whyestate.com';
-  const myRole      = resolveAppRole(me?.email);
+  const viewAsOverride = useViewAsStore((s) => s.role);
+  const myRole      = resolveAppRole(me?.email, viewAsOverride);
   const can         = (key: string) => canDo(myRole, key);
 
   // ── Board state (hydrated from Supabase on mount) ────────────────────────
@@ -3550,7 +3531,7 @@ export default function ProspectHub() {
       });
       setRecycleBin(mappedRecycle);
     } catch (e) {
-      console.error('[ProspectHub] refresh failed', e);
+      notifyError('Could not load Prospect Hub data', e);
     } finally {
       setLoadingHub(false);
     }
@@ -3609,7 +3590,7 @@ export default function ProspectHub() {
   const removeAgentPreset = async (id: string) => {
     setAgentPresets((prev) => prev.filter((p) => p.id !== id));
     try { await agentsApi.deleteAgentPreset(id); }
-    catch (e) { console.error('removeAgentPreset', e); void refreshHub(); }
+    catch (e) { notifyError('Could not remove agent', e); void refreshHub(); }
   };
 
   const memberCounts: Record<string, number> = {};
@@ -3625,7 +3606,7 @@ export default function ProspectHub() {
     setBoards((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
     if (activeBoard?.id === id) setActiveBoard((prev) => (prev ? { ...prev, ...patch } : prev));
     try { await boardsApi.updateBoard(id, patch); }
-    catch (e) { console.error('updateBoard', e); void refreshHub(); }
+    catch (e) { notifyError('Could not update board', e); void refreshHub(); }
   };
 
   // Invite — email gets resolved to a Supabase user_id via the profile
@@ -3646,50 +3627,55 @@ export default function ProspectHub() {
 
   const inviteBoardMember = async (boardId: string, email: string) => {
     const target = await resolveInvite(email);
-    if (!target) { window.alert(`No user found with email ${email}. They must sign up first.`); return; }
+    if (!target) { notifyError(`No user found with email ${email}`, 'Ask them to sign up first.'); return; }
     const member: BoardMember = { id: target.id, email, role: 'viewer' };
     setBoardMembers((prev) => ({ ...prev, [boardId]: [...(prev[boardId] ?? []), member] }));
-    try { await membersApi.addBoardMember(boardId, target.id, 'viewer'); }
-    catch (e) { console.error('inviteBoardMember', e); void refreshHub(); }
+    try { await membersApi.addBoardMember(boardId, target.id, 'viewer'); notifySuccess(`${email} invited`); }
+    catch (e) { notifyError('Could not invite member', e); void refreshHub(); }
   };
 
   const removeBoardMember = async (boardId: string, memberId: string) => {
     const list = boardMembers[boardId] ?? [];
     const target = list.find((m) => m.id === memberId);
-    if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return;
+    if (target && isMasterEmail(target.email)) return;
     setBoardMembers((prev) => ({ ...prev, [boardId]: (prev[boardId] ?? []).filter((m) => m.id !== memberId) }));
     try { await membersApi.removeBoardMember(boardId, memberId); }
-    catch (e) { console.error('removeBoardMember', e); void refreshHub(); }
+    catch (e) { notifyError('Could not remove member', e); void refreshHub(); }
   };
 
   const inviteFolderMember = async (folderId: string, email: string) => {
     const target = await resolveInvite(email);
-    if (!target) { window.alert(`No user found with email ${email}. They must sign up first.`); return; }
+    if (!target) { notifyError(`No user found with email ${email}`, 'Ask them to sign up first.'); return; }
     const member: BoardMember = { id: target.id, email, role: 'viewer' };
     setFolderMembers((prev) => ({ ...prev, [folderId]: [...(prev[folderId] ?? []), member] }));
-    try { await membersApi.addFolderMember(folderId, target.id, 'viewer'); }
-    catch (e) { console.error('inviteFolderMember', e); void refreshHub(); }
+    try { await membersApi.addFolderMember(folderId, target.id, 'viewer'); notifySuccess(`${email} invited to folder`); }
+    catch (e) { notifyError('Could not invite member', e); void refreshHub(); }
   };
 
   const removeFolderMember = async (folderId: string, memberId: string) => {
     const list = folderMembers[folderId] ?? [];
     const target = list.find((m) => m.id === memberId);
-    if (target && target.email.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return;
+    if (target && isMasterEmail(target.email)) return;
     setFolderMembers((prev) => ({ ...prev, [folderId]: (prev[folderId] ?? []).filter((m) => m.id !== memberId) }));
     try { await membersApi.removeFolderMember(folderId, memberId); }
-    catch (e) { console.error('removeFolderMember', e); void refreshHub(); }
+    catch (e) { notifyError('Could not remove member', e); void refreshHub(); }
   };
 
   // ── Folder mutations ──────────────────────────────────────────────────────
   // Auto-invite master admin to every new board/folder so they can see all work.
   const autoInviteMaster = async (kind: 'board' | 'folder', resourceId: string): Promise<void> => {
-    if (OWNER_EMAIL.toLowerCase() === MASTER_ADMIN_EMAIL_PH) return;
-    const master = profileByEmail.get(MASTER_ADMIN_EMAIL_PH);
+    // The board's creator (`OWNER_EMAIL`) is already the implicit admin of
+    // their own board, so if they're also the master no auto-invite is needed.
+    if (isMasterEmail(OWNER_EMAIL)) return;
+    // Find any master_admin in the directory and auto-invite them. There can
+    // be more than one in the future; pick the first.
+    const masters = directory.filter((p) => p.role === 'master_admin');
+    const master = masters[0];
     if (!master) return;
     try {
       if (kind === 'board') await membersApi.addBoardMember(resourceId, master.id, 'admin');
       else                  await membersApi.addFolderMember(resourceId, master.id, 'admin');
-    } catch (e) { console.error('autoInviteMaster', e); }
+    } catch (e) { notifyError('Could not auto-invite master admin', e); }
   };
 
   const createFolder = async (name: string) => {
@@ -3700,7 +3686,7 @@ export default function ProspectHub() {
       const folder = folderFromApi(created);
       setFolders((prev) => [...prev, folder]);
       await autoInviteMaster('folder', folder.id);
-    } catch (e) { console.error('createFolder', e); }
+    } catch (e) { notifyError('Could not create folder', e); }
   };
 
   const renameFolder = async (id: string, name: string) => {
@@ -3708,7 +3694,7 @@ export default function ProspectHub() {
     if (!trimmed) return;
     setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
     try { await foldersApi.renameFolder(id, trimmed); }
-    catch (e) { console.error('renameFolder', e); void refreshHub(); }
+    catch (e) { notifyError('Could not rename folder', e); void refreshHub(); }
   };
 
   const deleteFolder = async (id: string) => {
@@ -3722,13 +3708,13 @@ export default function ProspectHub() {
       setBoards((prev) => prev.map((b) => (b.folderId === id ? { ...b, folderId: null } : b)));
       setFolders((prev) => prev.filter((f) => f.id !== id));
       setFolderMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
-    } catch (e) { console.error('deleteFolder', e); void refreshHub(); }
+    } catch (e) { notifyError('Could not delete folder', e); void refreshHub(); }
   };
 
   const moveBoardToFolder = async (boardId: string, folderId: string | null) => {
     setBoards((prev) => prev.map((b) => (b.id === boardId ? { ...b, folderId } : b)));
     try { await boardsApi.updateBoard(boardId, { folderId }); }
-    catch (e) { console.error('moveBoardToFolder', e); void refreshHub(); }
+    catch (e) { notifyError('Could not move board', e); void refreshHub(); }
   };
   const toggleFolderCollapse = (id: string) => {
     setCollapsedFolders((prev) => {
@@ -3743,10 +3729,15 @@ export default function ProspectHub() {
   const unloadDemoData = async () => {
     const myBoards = boards.filter((b) => b.ownerEmail.toLowerCase() === myEmail);
     if (myBoards.length === 0) {
-      window.alert('Nothing to unload — you have no boards.');
+      notifyError('Nothing to unload', 'You have no boards yet.');
       return;
     }
-    const ok = window.confirm(`Remove all ${myBoards.length} of your boards and their prospects?\n\nBoards owned by other users won't be touched.`);
+    const ok = await confirm({
+      title: `Remove ${myBoards.length} board${myBoards.length === 1 ? '' : 's'}?`,
+      description: `All prospects in your boards will be permanently deleted. Boards owned by other users won't be touched.`,
+      confirmLabel: 'Remove all',
+      destructive: true,
+    });
     if (!ok) return;
     try {
       // FK ON DELETE CASCADE cleans prospects + memberships server-side.
@@ -3757,14 +3748,18 @@ export default function ProspectHub() {
       setActiveBoard(null);
       setView('board');
       await refreshHub();
-    } catch (e) { console.error('unloadDemoData', e); void refreshHub(); }
+    } catch (e) { notifyError('Could not remove your boards', e); void refreshHub(); }
   };
 
   // ── Load 50 × 300 demo dataset — uploads to Supabase board by board ───────
   // Each board does a single chunked insert via importProspects; the api layer
   // chunks 500 rows at a time so even the 300-row boards go in one request.
   const loadDemoData = async () => {
-    const ok = window.confirm('Load 50 demo project boards (300 prospects each)?\n\nThis adds ~15,000 prospect rows to your Supabase database. It may take 20–60 seconds.');
+    const ok = await confirm({
+      title: 'Load demo data?',
+      description: '50 demo project boards with 300 prospects each will be written to your Supabase database (about 15,000 rows total). This takes 20–60 seconds.',
+      confirmLabel: 'Load demo',
+    });
     if (!ok) return;
     suppressRealtime.current = true;
     setLoadingHub(true);
@@ -3786,8 +3781,7 @@ export default function ProspectHub() {
         }
       }
     } catch (e) {
-      console.error('loadDemoData', e);
-      window.alert((e as Error).message);
+      notifyError('Demo data load failed partway through', e);
     } finally {
       suppressRealtime.current = false;
       await refreshHub();
@@ -3809,7 +3803,7 @@ export default function ProspectHub() {
       setBoardProspects((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
       setBoardMembers((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
       if (activeBoard?.id === id) { setActiveBoard(null); setView('board'); }
-    } catch (e) { console.error('deleteBoard', e); void refreshHub(); }
+    } catch (e) { notifyError('Could not delete board', e); void refreshHub(); }
   };
 
   const createBoard = async (name: string, location: string, color: string) => {
@@ -3819,7 +3813,7 @@ export default function ProspectHub() {
       setBoards((prev) => [...prev, newBoard]);
       setBoardProspects((prev) => ({ ...prev, [newBoard.id]: [] }));
       await autoInviteMaster('board', newBoard.id);
-    } catch (e) { console.error('createBoard', e); }
+    } catch (e) { notifyError('Could not create board', e); }
   };
 
   const openBoard = (board: Board) => {
@@ -4085,7 +4079,7 @@ export default function ProspectHub() {
     const stamp = nowMyt();
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [key]: value, lastUpdate: stamp } : r)));
     void prospectsApi.updateProspectField(id, key, value).catch((e) => {
-      console.error('updateProspectField', e);
+      notifyError('Could not save the cell change', e);
       void refreshHub();
     });
   };
@@ -4123,7 +4117,7 @@ export default function ProspectHub() {
       activeBoard?.id
       ?? (folderView && folderViewBoardIds.length ? folderViewBoardIds[0] : null);
     if (!targetBoardId) {
-      window.alert('Open a board first to add a prospect row.');
+      notifyError('Open a board first', 'Prospect rows need to live in a board.');
       return;
     }
     try {
@@ -4133,7 +4127,7 @@ export default function ProspectHub() {
         const el = gridScrollRef.current;
         if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
       }, 50);
-    } catch (e) { console.error('addRow', e); }
+    } catch (e) { notifyError('Could not add prospect row', e); }
   };
 
   // Resolve which board a prospect currently lives in (single board view, folder view, or default seed).
@@ -4154,7 +4148,7 @@ export default function ProspectHub() {
         await recycleApi.pushToRecycleBin('prospect', {
           boardId: prospectHomeBoardId(id), prospect, customValues: customValues[id] ?? {},
         });
-      } catch (e) { console.error('pushToRecycleBin', e); }
+      } catch (e) { notifyError('Could not move item to recycle bin', e); }
     }
   };
 
@@ -4164,7 +4158,7 @@ export default function ProspectHub() {
     setSelectedRows((p) => { const s = new Set(p); s.delete(id); return s; });
     setCustomValues((p) => { const n = { ...p }; delete n[id]; return n; });
     try { await prospectsApi.deleteProspect(id); }
-    catch (e) { console.error('deleteProspect', e); void refreshHub(); }
+    catch (e) { notifyError('Could not delete prospect', e); void refreshHub(); }
   };
   const deleteSelected = async () => {
     const ids = Array.from(selectedRows);
@@ -4177,7 +4171,7 @@ export default function ProspectHub() {
     });
     setSelectedRows(new Set());
     try { await prospectsApi.deleteProspects(ids); }
-    catch (e) { console.error('deleteProspects', e); void refreshHub(); }
+    catch (e) { notifyError('Could not delete selected prospects', e); void refreshHub(); }
   };
   // ── Recycle Bin: restore + permanently purge ──────────────────────────────
   // Restore is best-effort: the DB has already cascaded the deletes, so we
@@ -4214,17 +4208,17 @@ export default function ProspectHub() {
       await recycleApi.purgeRecycleItem(id);
       setRecycleBin((prev) => prev.filter((x) => x.id !== id));
       await refreshHub();
-    } catch (e) { console.error('restoreFromBin', e); void refreshHub(); }
+    } catch (e) { notifyError('Could not restore item', e); void refreshHub(); }
   };
   const purgeFromBin = async (id: string) => {
     setRecycleBin((prev) => prev.filter((x) => x.id !== id));
     try { await recycleApi.purgeRecycleItem(id); }
-    catch (e) { console.error('purgeFromBin', e); void refreshHub(); }
+    catch (e) { notifyError('Could not purge item', e); void refreshHub(); }
   };
   const emptyBin = async () => {
     setRecycleBin([]);
     try { await recycleApi.purgeAllRecycleItems(); }
-    catch (e) { console.error('emptyBin', e); void refreshHub(); }
+    catch (e) { notifyError('Could not empty recycle bin', e); void refreshHub(); }
   };
 
   const duplicateRow = async (id: string) => {
@@ -4234,7 +4228,7 @@ export default function ProspectHub() {
       const created = await prospectsApi.duplicateProspect(id);
       setRows((prev) => { const idx = prev.findIndex((r) => r.id === id); const next = [...prev]; next.splice(idx + 1, 0, created); return next; });
       if (customValues[id]) setCustomValues((p) => ({ ...p, [created.id]: { ...p[id] } }));
-    } catch (e) { console.error('duplicateRow', e); }
+    } catch (e) { notifyError('Could not duplicate prospect', e); }
     setRowMenu(null);
   };
 
@@ -4261,7 +4255,7 @@ export default function ProspectHub() {
       setImportedClients(fresh);
       setImportToast({ name: client.name, created: !wasImported });
     } catch (err) {
-      console.error('importFromProspect failed', err);
+      notifyError('Could not import to Clients', err);
       setImportToast({ name: src.name || 'client', created: false });
     }
     setRowMenu(null);
@@ -4517,7 +4511,7 @@ export default function ProspectHub() {
       activeBoard?.id
       ?? (folderView && folderViewBoardIds.length ? folderViewBoardIds[0] : null);
     if (!targetBoardId) {
-      window.alert('Open a board first to import prospects.');
+      notifyError('Open a board first', 'Import targets a single board.');
       return;
     }
     try {
@@ -4525,8 +4519,7 @@ export default function ProspectHub() {
       await prospectsApi.importProspects(targetBoardId, rowsWithoutId, mode === 'replace' ? 'replace' : 'append');
       await refreshHub();
     } catch (e) {
-      console.error('importProspects', e);
-      window.alert((e as Error).message);
+      notifyError('Import failed', e);
     } finally {
       setShowImport(false);
     }
@@ -4550,7 +4543,7 @@ export default function ProspectHub() {
             Previewing Prospect Hub as <span className="font-bold">{previewDef?.label ?? myRole}</span> — buttons & access reflect the matrix configured in Admin Control.
           </span>
           <button
-            onClick={() => { setViewAsRole(null); window.location.reload(); }}
+            onClick={() => setViewAsRole(null)}
             className="ml-auto px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider hover:bg-white/20 transition-colors">
             Stop preview
           </button>
@@ -4654,7 +4647,7 @@ export default function ProspectHub() {
             const next = [...newVisible, ...invisible];
             setBoards(next);
             void boardsApi.reorderBoards(next.map((b) => b.id))
-              .catch((e) => { console.error('reorderBoards', e); void refreshHub(); });
+              .catch((e) => { notifyError('Could not save new board order', e); void refreshHub(); });
           }}
           onAddFolder={createFolder}
           onRenameFolder={renameFolder}
@@ -4685,7 +4678,7 @@ export default function ProspectHub() {
             // Only the REAL master admin (ignoring any active preview) sees this.
             available: actualAppRole(me?.email) === 'master_admin',
             current: myRole,
-            onChange: (next) => { setViewAsRole(next); window.location.reload(); },
+            onChange: (next) => { setViewAsRole(next); },
           }}
         />
       )}

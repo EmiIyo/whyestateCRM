@@ -85,9 +85,14 @@ export async function deleteBoard(id: string): Promise<void> {
 }
 
 export async function reorderBoards(orderedIds: string[]): Promise<void> {
-  // Sequential to avoid races; small list (boards count) so cost is negligible.
-  for (let i = 0; i < orderedIds.length; i++) {
-    const { error } = await supabase.from('boards').update({ position: i }).eq('id', orderedIds[i]);
-    if (error) throw error;
-  }
+  // Single-transaction reorder — the `reorder_boards` RPC walks the id array
+  // server-side, so partial-fail can't leave positions out of sync.
+  // Cast to bypass missing generated-types entry; the RPC exists at runtime.
+  const { error } = await (supabase.rpc as unknown as (
+    fn: string, args: { p_ids: string[] }
+  ) => Promise<{ error: { message: string } | null }>)(
+    'reorder_boards',
+    { p_ids: orderedIds },
+  );
+  if (error) throw new Error(error.message);
 }
