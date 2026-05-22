@@ -22,7 +22,7 @@ import { supabase } from '@/lib/supabase';
 import { confirm } from '@/components/ConfirmDialog';
 import { notifySuccess, notifyError } from '@/lib/notify';
 
-type Section = 'main' | 'prospect-hub' | 'user-setting';
+type Section = 'main' | 'prospect-hub' | 'user-setting' | 'sidebar-permissions';
 
 export default function AdminControl() {
   const [section, setSection] = useState<Section>('main');
@@ -33,16 +33,24 @@ export default function AdminControl() {
   if (section === 'user-setting') {
     return <UserSetting onBack={() => setSection('main')} />;
   }
+  if (section === 'sidebar-permissions') {
+    return <SidebarPermissionsSettings onBack={() => setSection('main')} />;
+  }
   return (
     <AdminMain
       onOpenProspectHub={() => setSection('prospect-hub')}
       onOpenUserSetting={() => setSection('user-setting')}
+      onOpenSidebarPermissions={() => setSection('sidebar-permissions')}
     />
   );
 }
 
 // ─── Main admin landing ─────────────────────────────────────────────────────
-function AdminMain({ onOpenProspectHub, onOpenUserSetting }: { onOpenProspectHub: () => void; onOpenUserSetting: () => void }) {
+function AdminMain({ onOpenProspectHub, onOpenUserSetting, onOpenSidebarPermissions }: {
+  onOpenProspectHub: () => void;
+  onOpenUserSetting: () => void;
+  onOpenSidebarPermissions: () => void;
+}) {
   return (
     <div className="flex-1 px-6 py-6">
       {/* Header */}
@@ -58,9 +66,11 @@ function AdminMain({ onOpenProspectHub, onOpenUserSetting }: { onOpenProspectHub
         </div>
       </div>
 
-      {/* Module sections */}
+      {/* Two columns max — User Setting + Prospect Hub Permissions fill the
+          first row; Sidebar Permissions sits on the second row at the same
+          column width. */}
       <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Modules</p>
-      <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
+      <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
         <button onClick={onOpenUserSetting}
           className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
           style={{ borderColor: '#E5E7EB' }}>
@@ -81,8 +91,21 @@ function AdminMain({ onOpenProspectHub, onOpenUserSetting }: { onOpenProspectHub
             <Settings2 size={18} style={{ color: '#0F766E' }} />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Permission Matrix</p>
-            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Sidebar visibility + per-role Prospect Hub controls</p>
+            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Prospect Hub Permissions</p>
+            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>What each role can do inside Prospect Hub</p>
+          </div>
+          <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
+        </button>
+
+        <button onClick={onOpenSidebarPermissions}
+          className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
+          style={{ borderColor: '#E5E7EB' }}>
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#E0F2FE' }}>
+            <ChevronRight size={18} style={{ color: '#0369A1' }} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Sidebar Permissions</p>
+            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Which modules each role can see in the sidebar</p>
           </div>
           <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
         </button>
@@ -611,10 +634,21 @@ function TierPicker({ value, onChange }: { value: UserTier; onChange: (t: UserTi
   );
 }
 
-// ─── Prospect Hub Setting (permissions matrix) ──────────────────────────────
+// ─── Shared permission-matrix page ──────────────────────────────────────────
+// Reused by ProspectHubSettings (everything except Navigation) and
+// SidebarPermissionsSettings (only Navigation). Pass the group whitelist + the
+// page header strings, the rest is identical.
 const EMPTY_PERMS: RolePerms = { master_admin: [], admin: [], editor: [], viewer: [] };
 
-function ProspectHubSettings({ onBack }: { onBack: () => void }) {
+interface MatrixPageProps {
+  onBack: () => void;
+  title: string;
+  description: string;
+  groups: string[];
+  icon: React.ElementType;
+}
+
+function PermissionMatrixPage({ onBack, title, description, groups, icon: HeaderIcon }: MatrixPageProps) {
   const [perms, setPerms]     = useState<RolePerms>(EMPTY_PERMS);
   const [saved, setSaved]     = useState<RolePerms>(EMPTY_PERMS);
   const [loading, setLoading] = useState(true);
@@ -695,12 +729,10 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
       <div className="flex items-start justify-between mb-6">
         <div>
           <div className="flex items-center gap-2">
-            <Settings2 size={20} style={{ color: '#1EC9C4' }} />
-            <h2 className="text-2xl font-bold" style={{ color: '#1A202C' }}>Permission Matrix</h2>
+            <HeaderIcon size={20} style={{ color: '#1EC9C4' }} />
+            <h2 className="text-2xl font-bold" style={{ color: '#1A202C' }}>{title}</h2>
           </div>
-          <p className="text-sm mt-1" style={{ color: '#9CA3AF' }}>
-            Toggle which sidebar modules each role sees (Navigation group) and which actions they can take inside Prospect Hub. Master Admin always has full access.
-          </p>
+          <p className="text-sm mt-1" style={{ color: '#9CA3AF' }}>{description}</p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <button onClick={reset}
@@ -748,7 +780,7 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
               </tr>
             </thead>
             <tbody>
-              {PERMISSION_GROUPS.map((group) => (
+              {groups.map((group) => (
                 <RowGroup key={group} group={group} perms={perms} isChecked={isChecked} toggle={toggle} />
               ))}
             </tbody>
@@ -760,6 +792,36 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
         Changes save to Supabase (<code style={{ background: '#F3F4F6', padding: '1px 4px', borderRadius: 4 }}>role_permissions</code>) and propagate live to every signed-in member.
       </p>
     </div>
+  );
+}
+
+// ─── Sidebar Permissions sub-page (Navigation group only) ───────────────────
+function SidebarPermissionsSettings({ onBack }: { onBack: () => void }) {
+  return (
+    <PermissionMatrixPage
+      onBack={onBack}
+      title="Sidebar Permissions"
+      description="Control which top-level modules each role sees in the sidebar. Master Admin always sees everything."
+      groups={['Navigation']}
+      icon={ChevronRight}
+    />
+  );
+}
+
+// ─── Prospect Hub Permissions sub-page (everything except Navigation) ───────
+function ProspectHubSettings({ onBack }: { onBack: () => void }) {
+  // Filter out the Navigation group — that lives on its own page now so the
+  // two concerns (which modules a role sees vs. what they can do inside a
+  // module) don't get tangled in one giant table.
+  const groups = PERMISSION_GROUPS.filter((g) => g !== 'Navigation');
+  return (
+    <PermissionMatrixPage
+      onBack={onBack}
+      title="Prospect Hub Permissions"
+      description="Toggle what each role can do inside Prospect Hub. Master Admin always has full access."
+      groups={groups}
+      icon={Settings2}
+    />
   );
 }
 

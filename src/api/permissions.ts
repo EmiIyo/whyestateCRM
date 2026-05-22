@@ -22,11 +22,11 @@ export interface PermissionDef {
 export const PERMISSIONS: PermissionDef[] = [
   // Sidebar / route gates — controls which top-level modules each role can
   // see and visit. Hiding the nav entry also blocks the URL from working.
-  { key: 'nav.dashboard',         label: 'Dashboard module',                group: 'Navigation' },
-  { key: 'nav.leads',             label: 'Prospect Hub module',             group: 'Navigation' },
-  { key: 'nav.clients',           label: 'Clients module',                  group: 'Navigation' },
-  { key: 'nav.calendar',          label: 'Calendar module',                 group: 'Navigation' },
-  { key: 'nav.documents',         label: 'Documents module',                group: 'Navigation' },
+  { key: 'nav.dashboard',         label: 'Dashboard',                       group: 'Navigation' },
+  { key: 'nav.leads',             label: 'Prospect Hub',                    group: 'Navigation' },
+  { key: 'nav.clients',           label: 'Clients',                         group: 'Navigation' },
+  { key: 'nav.calendar',          label: 'Calendar',                        group: 'Navigation' },
+  { key: 'nav.documents',         label: 'Documents',                       group: 'Navigation' },
 
   { key: 'boards.create',         label: 'Create new board',                group: 'Boards' },
   { key: 'boards.edit',           label: 'Edit board settings',             group: 'Boards' },
