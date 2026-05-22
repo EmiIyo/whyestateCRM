@@ -8,7 +8,6 @@ type UserTier = Enums<'user_tier'>;
 import {
   LayoutDashboard,
   Target,
-  Bell,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -475,15 +474,6 @@ function TopBar({
       )}
 
       <div className="flex-1" />
-
-      {/* Bell */}
-      <button className="relative p-2 rounded-lg hover:bg-[#F5F7FA] transition-colors flex-shrink-0">
-        <Bell size={18} style={{ color: '#A1A9B6' }} />
-        <span
-          className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full border-2 border-white"
-          style={{ background: '#FF4F6C' }}
-        />
-      </button>
 
       {/* User profile button + dropdown */}
       <div ref={menuRef} className="relative flex-shrink-0">
