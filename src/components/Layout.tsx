@@ -315,9 +315,13 @@ function Sidebar({
   // saves a change — no refresh required, even for the affected user.
   const perms = usePermsStore((s) => s.perms);
 
+  // Admin Control visible when: master_admin OR any sub-panel granted.
+  const adminAccess = profile?.admin_access ?? [];
+  const canSeeAdmin = meRole === 'master_admin' || adminAccess.length > 0;
   const visibleSecondary = useMemo(() => secondaryNavItems.filter((item) =>
-    item.path === ROUTE_PATHS.ADMIN ? meRole === 'master_admin' : true
-  ), [meRole]);
+    item.path === ROUTE_PATHS.ADMIN ? canSeeAdmin : true
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [meRole, canSeeAdmin]);
 
   const visibleNav = useMemo(
     () => navItems.filter((item) => !item.permission || canDo(meRole, item.permission)),
@@ -430,6 +434,9 @@ function TopBar({
   const avatarColor  = profile?.avatar_color || DEFAULT_AVATAR_COLOR;
   const avatarUrl    = profile?.avatar_url || null;
   const isMaster     = userRole === 'master_admin';
+  // Topbar dropdown shows Admin Control for master + any delegated admin.
+  const topbarAdminAccess = profile?.admin_access ?? [];
+  const showAdminLink     = isMaster || topbarAdminAccess.length > 0;
   void roleTone; void roleLabel; // kept for future role-badge use
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -509,7 +516,7 @@ function TopBar({
                 {userRoleLbl}
               </span>
             </div>
-            {isMaster && (
+            {showAdminLink && (
               <button onClick={() => { setMenuOpen(false); navigate(ROUTE_PATHS.ADMIN); }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium hover:bg-gray-50 transition-colors text-left"
                 style={{ color: '#374151' }}>

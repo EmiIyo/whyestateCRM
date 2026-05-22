@@ -6,17 +6,18 @@ import { ROUTE_PATHS } from '@/lib/index';
 export default function RequireAuth({
   children,
   masterOnly = false,
+  adminPanel = false,
   requireRoles,
   permission,
 }: {
   children: React.ReactNode;
   masterOnly?: boolean;
-  requireRoles?: Role[];
   /**
-   * Permission key (e.g. 'nav.calendar') the current role must have. Falls
-   * back to the LEADS landing page if missing so the user always has
-   * somewhere to go. Re-evaluates whenever the admin matrix changes.
+   * Admin Control gate — master_admin OR any non-empty `admin_access`.
+   * Use this for the /admin route so delegated admins can reach the panel.
    */
+  adminPanel?: boolean;
+  requireRoles?: Role[];
   permission?: string;
 }) {
   const ready   = useAuthStore((s) => s.ready);
@@ -35,16 +36,18 @@ export default function RequireAuth({
   if (!user) return <Navigate to="/" replace />;
 
   const role: Role = profile?.role ?? 'viewer';
+  const access = profile?.admin_access ?? [];
 
   if (masterOnly && role !== 'master_admin') {
+    return <Navigate to={ROUTE_PATHS.LEADS} replace />;
+  }
+  if (adminPanel && role !== 'master_admin' && access.length === 0) {
     return <Navigate to={ROUTE_PATHS.LEADS} replace />;
   }
   if (requireRoles && requireRoles.length > 0 && !requireRoles.includes(role)) {
     return <Navigate to={ROUTE_PATHS.LEADS} replace />;
   }
   if (permission && !canDo(role, permission)) {
-    // If the user's own LEADS access was just revoked, fall through to HOME
-    // so they don't end up in a redirect loop.
     const safeFallback = permission === 'nav.leads' ? ROUTE_PATHS.HOME : ROUTE_PATHS.LEADS;
     return <Navigate to={safeFallback} replace />;
   }

@@ -560,6 +560,7 @@ export type Database = {
       }
       profiles: {
         Row: {
+          admin_access: string[]
           avatar_color: string
           avatar_url: string | null
           created_at: string
@@ -571,6 +572,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          admin_access?: string[]
           avatar_color?: string
           avatar_url?: string | null
           created_at?: string
@@ -582,6 +584,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          admin_access?: string[]
           avatar_color?: string
           avatar_url?: string | null
           created_at?: string
@@ -724,6 +727,13 @@ export type Database = {
         Args: {
           p_tier: Database["public"]["Enums"]["user_tier"]
           p_user_id: string
+        }
+        Returns: undefined
+      }
+      admin_set_admin_access: {
+        Args: {
+          p_user_id: string
+          p_access: string[]
         }
         Returns: undefined
       }

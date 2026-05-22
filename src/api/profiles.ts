@@ -54,6 +54,19 @@ export async function adminSetUserTier(userId: string, tier: UserTier): Promise<
   if (error) throw error;
 }
 
+// Admin sub-panel keys — keep in sync with the DB validator.
+export type AdminPanel = 'users' | 'sidebar_permissions' | 'prospect_hub_permissions';
+export const ADMIN_PANELS: { key: AdminPanel; label: string }[] = [
+  { key: 'users',                      label: 'User Setting' },
+  { key: 'sidebar_permissions',        label: 'Sidebar Permissions' },
+  { key: 'prospect_hub_permissions',   label: 'Prospect Hub Permissions' },
+];
+
+export async function adminSetAdminAccess(userId: string, access: AdminPanel[]): Promise<void> {
+  const { error } = await supabase.rpc('admin_set_admin_access', { p_user_id: userId, p_access: access });
+  if (error) throw error;
+}
+
 export async function adminUpdateProfile(userId: string, patch: {
   display_name?: string;
   avatar_color?: string;

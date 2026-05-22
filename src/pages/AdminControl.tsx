@@ -1,7 +1,7 @@
-import { useMemo, useState, useEffect, useCallback } from 'react';
+import { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import {
   ShieldCheck, Check, RotateCcw, Save, ChevronLeft, ChevronRight, Settings2, Search, Users as UsersIcon,
-  KeyRound, UserPlus, X, AlertCircle, Pencil, Copy,
+  KeyRound, UserPlus, X, AlertCircle, Pencil, Copy, ChevronDown,
 } from 'lucide-react';
 import {
   PERMISSIONS, PERMISSION_GROUPS, ROLES,
@@ -16,7 +16,10 @@ import {
   type DirectoryUser, type UserTier,
 } from '@/lib/auth';
 import { loadRolePerms } from '@/api/permissions';
-import { adminUpdateProfile, adminSetUserTier, deleteUser } from '@/api/profiles';
+import {
+  adminUpdateProfile, adminSetUserTier, deleteUser,
+  adminSetAdminAccess, ADMIN_PANELS, type AdminPanel,
+} from '@/api/profiles';
 import { createInvite, listInvites, revokeInvite, type Invite } from '@/api/invites';
 import { supabase } from '@/lib/supabase';
 import { confirm } from '@/components/ConfirmDialog';
@@ -26,14 +29,31 @@ type Section = 'main' | 'prospect-hub' | 'user-setting' | 'sidebar-permissions';
 
 export default function AdminControl() {
   const [section, setSection] = useState<Section>('main');
+  // Subscribe to the auth store so admin_access changes (matrix saves,
+  // realtime updates) re-render this guard immediately.
+  const profile = useAuthStore((s) => s.profile);
+  const isMaster = profile?.role === 'master_admin';
+  const access = profile?.admin_access ?? [];
 
-  if (section === 'prospect-hub') {
+  const canUsers           = isMaster || access.includes('users');
+  const canSidebarPerms    = isMaster || access.includes('sidebar_permissions');
+  const canProspectHubPerms= isMaster || access.includes('prospect_hub_permissions');
+
+  // If the user lost access to the sub-page they're on (e.g. admin
+  // un-checked the box mid-session), drop them back to the landing.
+  useEffect(() => {
+    if (section === 'user-setting'        && !canUsers)            setSection('main');
+    if (section === 'sidebar-permissions' && !canSidebarPerms)     setSection('main');
+    if (section === 'prospect-hub'        && !canProspectHubPerms) setSection('main');
+  }, [section, canUsers, canSidebarPerms, canProspectHubPerms]);
+
+  if (section === 'prospect-hub' && canProspectHubPerms) {
     return <ProspectHubSettings onBack={() => setSection('main')} />;
   }
-  if (section === 'user-setting') {
+  if (section === 'user-setting' && canUsers) {
     return <UserSetting onBack={() => setSection('main')} />;
   }
-  if (section === 'sidebar-permissions') {
+  if (section === 'sidebar-permissions' && canSidebarPerms) {
     return <SidebarPermissionsSettings onBack={() => setSection('main')} />;
   }
   return (
@@ -41,15 +61,21 @@ export default function AdminControl() {
       onOpenProspectHub={() => setSection('prospect-hub')}
       onOpenUserSetting={() => setSection('user-setting')}
       onOpenSidebarPermissions={() => setSection('sidebar-permissions')}
+      canUsers={canUsers}
+      canSidebarPerms={canSidebarPerms}
+      canProspectHubPerms={canProspectHubPerms}
     />
   );
 }
 
 // ─── Main admin landing ─────────────────────────────────────────────────────
-function AdminMain({ onOpenProspectHub, onOpenUserSetting, onOpenSidebarPermissions }: {
+function AdminMain({ onOpenProspectHub, onOpenUserSetting, onOpenSidebarPermissions, canUsers, canSidebarPerms, canProspectHubPerms }: {
   onOpenProspectHub: () => void;
   onOpenUserSetting: () => void;
   onOpenSidebarPermissions: () => void;
+  canUsers: boolean;
+  canSidebarPerms: boolean;
+  canProspectHubPerms: boolean;
 }) {
   return (
     <div className="flex-1 px-6 py-6">
@@ -68,47 +94,54 @@ function AdminMain({ onOpenProspectHub, onOpenUserSetting, onOpenSidebarPermissi
 
       {/* Two columns max — User Setting + Prospect Hub Permissions fill the
           first row; Sidebar Permissions sits on the second row at the same
-          column width. */}
+          column width. Each card only renders when the current user has
+          access to that panel (master_admin always sees everything). */}
       <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Modules</p>
       <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
-        <button onClick={onOpenUserSetting}
-          className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
-          style={{ borderColor: '#E5E7EB' }}>
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#FEF3C7' }}>
-            <UsersIcon size={18} style={{ color: '#92400E' }} />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>User Setting</p>
-            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Assign a role to each user</p>
-          </div>
-          <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
-        </button>
+        {canUsers && (
+          <button onClick={onOpenUserSetting}
+            className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
+            style={{ borderColor: '#E5E7EB' }}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#FEF3C7' }}>
+              <UsersIcon size={18} style={{ color: '#92400E' }} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold" style={{ color: '#1A202C' }}>User Setting</p>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Assign a role to each user</p>
+            </div>
+            <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
+          </button>
+        )}
 
-        <button onClick={onOpenProspectHub}
-          className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
-          style={{ borderColor: '#E5E7EB' }}>
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#DAF3F2' }}>
-            <Settings2 size={18} style={{ color: '#0F766E' }} />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Prospect Hub Permissions</p>
-            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>What each role can do inside Prospect Hub</p>
-          </div>
-          <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
-        </button>
+        {canProspectHubPerms && (
+          <button onClick={onOpenProspectHub}
+            className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
+            style={{ borderColor: '#E5E7EB' }}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#DAF3F2' }}>
+              <Settings2 size={18} style={{ color: '#0F766E' }} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Prospect Hub Permissions</p>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>What each role can do inside Prospect Hub</p>
+            </div>
+            <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
+          </button>
+        )}
 
-        <button onClick={onOpenSidebarPermissions}
-          className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
-          style={{ borderColor: '#E5E7EB' }}>
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#E0F2FE' }}>
-            <ChevronRight size={18} style={{ color: '#0369A1' }} />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Sidebar Permissions</p>
-            <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Which modules each role can see in the sidebar</p>
-          </div>
-          <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
-        </button>
+        {canSidebarPerms && (
+          <button onClick={onOpenSidebarPermissions}
+            className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
+            style={{ borderColor: '#E5E7EB' }}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#E0F2FE' }}>
+              <ChevronRight size={18} style={{ color: '#0369A1' }} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Sidebar Permissions</p>
+              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Which modules each role can see in the sidebar</p>
+            </div>
+            <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
+          </button>
+        )}
       </div>
     </div>
   );
@@ -153,6 +186,10 @@ function listKnownUsers(): DirectoryUser[] {
 function UsersTable() {
   const me = getCurrentUser();
   const myEmail = (me?.email ?? '').toLowerCase();
+  // Subscribe so admin_access edits made elsewhere (or this row's own
+  // dropdown) re-render the table immediately — directory is the source of
+  // truth for both the row identity (id) and the access array.
+  const directory = useAuthStore((s) => s.directory);
   const [q, setQ] = useState('');
   const [tick, setTick] = useState(0);
   const [showAddUser, setShowAddUser] = useState(false);
@@ -181,11 +218,12 @@ function UsersTable() {
     return u.email.toLowerCase().includes(lower) || (u.name ?? '').toLowerCase().includes(lower);
   });
 
-  // Resolve a directory user → underlying profile id via the auth store.
-  const profileIdFor = (email: string): string | null => {
+  // Resolve a directory user → underlying profile row via the auth store.
+  const profileFor = (email: string) => {
     const lower = email.toLowerCase();
-    return useAuthStore.getState().directory.find((p) => p.email.toLowerCase() === lower)?.id ?? null;
+    return directory.find((p) => p.email.toLowerCase() === lower) ?? null;
   };
+  const profileIdFor = (email: string): string | null => profileFor(email)?.id ?? null;
 
   const handleRoleChange = async (email: string, role: Role) => {
     try { await setUserRole(email, role); await refreshDirectory(); setTick((t) => t + 1); }
@@ -196,6 +234,12 @@ function UsersTable() {
     if (!id) return;
     try { await adminSetUserTier(id, tier); await refreshDirectory(); setTick((t) => t + 1); }
     catch (e) { notifyError('Could not change tier', e); }
+  };
+  const handleAdminAccessChange = async (email: string, next: AdminPanel[]) => {
+    const id = profileIdFor(email);
+    if (!id) return;
+    try { await adminSetAdminAccess(id, next); await refreshDirectory(); setTick((t) => t + 1); }
+    catch (e) { notifyError('Could not update admin access', e); }
   };
 
   const startEdit = (u: DirectoryUser) => { setEditingEmail(u.email); setDraftName(u.name || ''); };
@@ -268,6 +312,7 @@ function UsersTable() {
               <th style={{ textAlign: 'left',  padding: '10px 12px' }}>User</th>
               <th style={{ textAlign: 'left',  padding: '10px 12px' }}>Email</th>
               <th style={{ textAlign: 'left',  padding: '10px 12px' }}>Joined</th>
+              <th style={{ textAlign: 'left',  padding: '10px 12px', width: 170 }}>Admin Access</th>
               <th style={{ textAlign: 'left',  padding: '10px 12px', width: 180 }}>Tier</th>
               <th style={{ textAlign: 'left',  padding: '10px 12px', width: 180 }}>Permission</th>
               <th style={{ textAlign: 'center', padding: '10px 12px', width: 200 }}>Actions</th>
@@ -275,7 +320,7 @@ function UsersTable() {
           </thead>
           <tbody>
             {filtered.length === 0 ? (
-              <tr><td colSpan={6} className="text-center py-10 text-xs" style={{ color: '#9CA3AF' }}>No users yet.</td></tr>
+              <tr><td colSpan={7} className="text-center py-10 text-xs" style={{ color: '#9CA3AF' }}>No users yet.</td></tr>
             ) : filtered.map((u) => {
               const role = getUserRole(u.email);
               const tier = getUserTier(u.email);
@@ -328,6 +373,15 @@ function UsersTable() {
                   </td>
                   <td style={{ padding: '10px 12px', verticalAlign: 'middle' }}>
                     <span className="text-xs" style={{ color: '#9CA3AF' }}>{fmtDate(u.firstSeen)}</span>
+                  </td>
+                  <td style={{ padding: '10px 12px', verticalAlign: 'middle' }}>
+                    <AdminAccessPicker
+                      access={(profileFor(u.email)?.admin_access ?? []) as AdminPanel[]}
+                      // Master Admin already has inherent full access; editing
+                      // admin_access on that row is meaningless, so lock it.
+                      locked={role === 'master_admin'}
+                      onChange={(next) => handleAdminAccessChange(u.email, next)}
+                    />
                   </td>
                   <td style={{ padding: '10px 12px', verticalAlign: 'middle' }}>
                     <TierPicker value={tier} onChange={(t) => handleTierChange(u.email, t)} />
@@ -631,6 +685,108 @@ function TierPicker({ value, onChange }: { value: UserTier; onChange: (t: UserTi
       style={{ background: tone.bg, color: tone.text, borderColor: 'transparent', minWidth: 150 }}>
       {USER_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
     </select>
+  );
+}
+
+// ─── Admin Access picker — compact dropdown with one checkbox per sub-panel.
+// Per-user delegation of which Admin Control panels they can open. A user
+// with zero entries here does not see the Admin Control sidebar item at all.
+// Master Admin gets a locked "Full" pill since their access is inherent.
+function AdminAccessPicker({ access, locked, onChange }: {
+  access: AdminPanel[];
+  locked?: boolean;
+  onChange: (next: AdminPanel[]) => Promise<void> | void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  // Close on outside click + Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const toggle = async (key: AdminPanel) => {
+    if (busy) return;
+    const set = new Set(access);
+    if (set.has(key)) set.delete(key); else set.add(key);
+    setBusy(true);
+    try { await onChange(Array.from(set)); }
+    finally { setBusy(false); }
+  };
+
+  const count = access.length;
+  const active = locked || count > 0;
+  const label = locked ? 'Full' : `${count} permission${count === 1 ? '' : 's'}`;
+
+  return (
+    <div ref={wrapRef} className="relative inline-block">
+      <button
+        type="button"
+        disabled={locked}
+        onClick={() => setOpen((v) => !v)}
+        title={locked ? 'Master Admin has inherent full access' : 'Choose which Admin Control panels this user can open'}
+        className="text-xs font-semibold border rounded-lg px-2.5 py-1.5 outline-none cursor-pointer focus:border-[#1EC9C4] disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+        style={{
+          background: active ? '#DAF3F2' : '#F3F4F6',
+          color: active ? '#0F766E' : '#6B7280',
+          borderColor: 'transparent',
+          minWidth: 140,
+          opacity: locked ? 0.7 : 1,
+        }}>
+        <span className="flex-1 text-left">{label}</span>
+        {!locked && <ChevronDown size={12} />}
+      </button>
+      {open && !locked && (
+        <div
+          className="absolute right-0 z-30 mt-1 w-64 rounded-xl border shadow-lg overflow-hidden"
+          style={{ borderColor: '#E5E7EB', background: 'white', boxShadow: '0 10px 30px rgba(0,0,0,0.12)' }}>
+          <div
+            className="px-3 py-2 border-b text-[10px] font-bold uppercase tracking-wider"
+            style={{ color: '#9CA3AF', borderColor: '#F1F5F9', background: '#FAFBFC' }}>
+            Admin Control sub-panels
+          </div>
+          <div className="py-1">
+            {ADMIN_PANELS.map((p) => {
+              const checked = access.includes(p.key);
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => { void toggle(p.key); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed">
+                  <span
+                    className="w-4 h-4 rounded border flex items-center justify-center flex-shrink-0"
+                    style={{
+                      borderColor: checked ? '#1EC9C4' : '#D1D5DB',
+                      background:  checked ? '#1EC9C4' : 'white',
+                    }}>
+                    {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                  </span>
+                  <span style={{ color: '#374151' }}>{p.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div
+            className="px-3 py-2 border-t text-[11px]"
+            style={{ color: '#9CA3AF', borderColor: '#F1F5F9', background: '#FAFBFC' }}>
+            User sees Admin Control if at least one box is checked.
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

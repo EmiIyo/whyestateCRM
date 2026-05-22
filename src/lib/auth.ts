@@ -98,6 +98,25 @@ export async function refreshDirectory(): Promise<void> {
   } catch { /* swallow — usually means not signed-in yet */ }
 }
 
+// ─── Admin Control sub-panel access helpers ────────────────────────────────
+// Master admin always has full access. Other users see only the panels whose
+// keys are present in their `profiles.admin_access` array.
+export type AdminPanelKey = 'users' | 'sidebar_permissions' | 'prospect_hub_permissions';
+
+export function hasAdminAccess(panel: AdminPanelKey): boolean {
+  const p = useAuthStore.getState().profile;
+  if (!p) return false;
+  if (p.role === 'master_admin') return true;
+  return (p.admin_access ?? []).includes(panel);
+}
+
+export function hasAnyAdminAccess(): boolean {
+  const p = useAuthStore.getState().profile;
+  if (!p) return false;
+  if (p.role === 'master_admin') return true;
+  return (p.admin_access ?? []).length > 0;
+}
+
 // ─── Synchronous read helpers (the rest of the app calls these) ───────────
 export function isAuthed(): boolean {
   return useAuthStore.getState().user !== null;

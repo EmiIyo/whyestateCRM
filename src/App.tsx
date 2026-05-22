@@ -44,7 +44,7 @@ const App = () => (
           <Route path={ROUTE_PATHS.DEALS}      element={<RequireAuth><Layout><UnderDevelopment name="Deals" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.COMMISSION} element={<RequireAuth><Layout><UnderDevelopment name="Commission" /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth permission="nav.documents"><Layout><DocumentsPage /></Layout></RequireAuth>} />
-          <Route path={ROUTE_PATHS.ADMIN}      element={<RequireAuth masterOnly><Layout><AdminControl /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.ADMIN}      element={<RequireAuth adminPanel><Layout><AdminControl /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.SETTINGS}   element={<RequireAuth><Layout><MyProfile /></Layout></RequireAuth>} />
 
           <Route path="*" element={<NotFound />} />
