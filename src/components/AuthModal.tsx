@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, Mail, Lock, User as UserIcon, Loader2, KeyRound, ArrowLeft, Check, AlertCircle } from 'lucide-react';
-import { signIn, signUp, requestPasswordReset, setPassword } from '@/lib/auth';
+import { signIn, signUp, requestPasswordReset, setPassword, useAuthStore } from '@/lib/auth';
 import { redeemInvite } from '@/api/invites';
+import { getMyProfile } from '@/api/profiles';
+import { refreshPermissions } from '@/lib/permissions';
 import { ROUTE_PATHS } from '@/lib/index';
 
 type Mode = 'signin' | 'signup' | 'forgot';
@@ -47,6 +49,16 @@ export default function AuthModal({
     try {
       if (mode === 'signup') {
         await signUp(email, password, name);
+
+        // `bootAuth`'s onAuthStateChange listener populates the store async.
+        // Poll briefly so the next steps see a user with a session — without
+        // this we can navigate to /leads while the store still has user=null,
+        // which causes the "flash to home, then back" jitter the user saw.
+        for (let i = 0; i < 30; i++) {
+          if (useAuthStore.getState().user) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+
         if (inviteCode.trim()) {
           // Best-effort redeem; failures surface in the UI but don't block sign-up.
           try { await redeemInvite(inviteCode.trim()); }
@@ -55,8 +67,24 @@ export default function AuthModal({
             // Still navigate — user is signed in either way.
           }
         }
+
+        // The auth subscriber may have already fetched the profile with the
+        // pre-redeem role. Re-pull it so the in-memory copy carries the role
+        // the user was just granted, otherwise ProspectHub mounts with stale
+        // permissions and renders the wrong empty state.
+        try {
+          const fresh = await getMyProfile();
+          if (fresh) useAuthStore.getState().setProfile(fresh);
+        } catch { /* non-fatal */ }
+        // Pull the permission matrix so canDo() works on first render.
+        await refreshPermissions().catch(() => { /* non-fatal */ });
       } else {
         await signIn(email, password);
+        // Same trick on sign-in: wait for the subscriber to land.
+        for (let i = 0; i < 30; i++) {
+          if (useAuthStore.getState().user) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
       }
       onClose();
       navigate(ROUTE_PATHS.LEADS, { replace: true });

@@ -5,7 +5,7 @@ import {
   Plus, Search, Filter, Download, Upload, ChevronDown, ChevronLeft, ChevronRight, X, Check, Trash2, Copy,
   AlertCircle, CheckCircle2, Loader2, Users, UserPlus,
   GripVertical, Settings2, Mail, Folder as FolderIcon, FolderPlus, Layers,
-  FileText, FileSpreadsheet, Eye,
+  FileText, FileSpreadsheet, Eye, Target,
 } from 'lucide-react';
 import * as SliderPrimitive from '@radix-ui/react-slider';
 import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage, getUserTier, useAuthStore } from '@/lib/auth';
@@ -4570,6 +4570,17 @@ export default function ProspectHub() {
   const isPreviewing = realRole === 'master_admin' && myRole !== 'master_admin';
   const previewDef  = APP_ROLES.find((r) => r.id === myRole);
 
+  // Empty-state branches — show a friendly screen until data hydrates AND
+  // a separate one for users who genuinely have nothing yet (fresh signup,
+  // no boards owned, no boards invited to).
+  const hubIsTrulyEmpty =
+    !loadingHub
+    && boards.length === 0
+    && visibleBoards.length === 0
+    && visibleFolders.length === 0
+    && view === 'board';
+  const canCreateAnything = can('boards.create') || can('folders.create');
+
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col" style={{ background: '#F5F7FA' }}>
 
@@ -4588,6 +4599,51 @@ export default function ProspectHub() {
         </div>
       )}
 
+      {/* ── Loading state — shown while the first refreshHub() is in flight.
+            Prevents the "blank screen flash" right after signup/login. ── */}
+      {loadingHub && (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 size={28} className="animate-spin" style={{ color: '#1EC9C4' }} />
+            <p className="text-sm" style={{ color: '#9CA3AF' }}>Loading your boards…</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Friendly empty state for fresh-signup users with zero boards.
+            Distinct from the "you have boards but the list is empty in this
+            filter" state, which the board overview handles itself. ── */}
+      {hubIsTrulyEmpty && (
+        <div className="flex-1 flex items-center justify-center px-6">
+          <div className="max-w-md w-full bg-white rounded-2xl border p-8 text-center" style={{ borderColor: '#F1F5F9' }}>
+            <div className="w-14 h-14 mx-auto rounded-2xl flex items-center justify-center mb-4" style={{ background: '#DAF3F2' }}>
+              <Target size={26} style={{ color: '#0F766E' }} />
+            </div>
+            <h2 className="text-lg font-bold" style={{ color: '#1A202C' }}>Nothing here yet</h2>
+            <p className="text-sm mt-2" style={{ color: '#6B7280' }}>
+              {canCreateAnything
+                ? <>You don't have any boards yet. Create your first one to start tracking prospects.</>
+                : <>You haven't been invited to any boards yet. Ask your master admin to invite you, or to grant your role permission to create boards.</>}
+            </p>
+            {can('boards.create') && (
+              <button
+                onClick={() => setShowNewBoard(true)}
+                className="mt-5 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90"
+                style={{ background: '#1EC9C4' }}>
+                <Plus size={14} strokeWidth={2.5} /> New Board
+              </button>
+            )}
+            {!canCreateAnything && (
+              <p className="text-[11px] mt-4" style={{ color: '#9CA3AF' }}>
+                Signed in as <strong>{me?.email}</strong>
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Hide the rest of the hub while the loader or empty state is showing. */}
+      {!loadingHub && !hubIsTrulyEmpty && (<>
       {/* ── Toolbar (grid view only) ──────────────────────────────── */}
       {view === 'grid' && (
         <div className="flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-100 flex-shrink-0">
@@ -5110,6 +5166,7 @@ export default function ProspectHub() {
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 }
