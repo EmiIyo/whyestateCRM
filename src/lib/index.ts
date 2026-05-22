@@ -1,6 +1,7 @@
 // ─── Route Constants ───────────────────────────────────────────────────────
 export const ROUTE_PATHS = {
   HOME: '/',
+  PENDING: '/pending',
   DASHBOARD: '/dashboard',
   LEADS: '/leads',
   LISTINGS: '/listings',

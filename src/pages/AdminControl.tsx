@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState, useEffect, useCallback } from 'react';
+import { useMemo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ShieldCheck, Check, RotateCcw, Save, ChevronLeft, ChevronRight, Settings2, Search, Users as UsersIcon,
-  KeyRound, UserPlus, X, AlertCircle, Pencil, Copy, ChevronDown,
+  KeyRound, X, AlertCircle, Pencil, ChevronDown, Clock,
 } from 'lucide-react';
 import {
   PERMISSIONS, PERMISSION_GROUPS, ROLES,
@@ -18,10 +18,9 @@ import {
 } from '@/lib/auth';
 import { loadRolePerms } from '@/api/permissions';
 import {
-  adminUpdateProfile, adminSetUserTier, deleteUser,
+  adminUpdateProfile, adminSetUserTier, adminApproveUser, adminRejectUser,
   adminSetAdminAccess, ADMIN_PANELS, type AdminPanel,
 } from '@/api/profiles';
-import { createInvite, listInvites, revokeInvite, type Invite } from '@/api/invites';
 import { supabase } from '@/lib/supabase';
 import { confirm } from '@/components/ConfirmDialog';
 import { notifySuccess, notifyError } from '@/lib/notify';
@@ -200,8 +199,19 @@ function UserSetting({ onBack }: { onBack: () => void }) {
 // localStorage `we.crm.state` merge is gone — every user is now a real
 // Supabase Auth account, and the trigger handle_new_user keeps profiles in
 // sync on every signup.
-function listKnownUsers(): DirectoryUser[] {
-  return [...listAllUsers()].sort((a, b) => a.email.localeCompare(b.email));
+// Sort pending users (approved_at IS NULL) to the top so admins see fresh
+// signup requests first; within each group keep alphabetical-by-email so the
+// list doesn't reshuffle on every realtime tick.
+function listKnownUsers(directory: ReturnType<typeof useAuthStore.getState>['directory']): DirectoryUser[] {
+  const pendingEmails = new Set(
+    directory.filter((p) => !p.approved_at).map((p) => p.email.toLowerCase()),
+  );
+  return [...listAllUsers()].sort((a, b) => {
+    const ap = pendingEmails.has(a.email.toLowerCase()) ? 0 : 1;
+    const bp = pendingEmails.has(b.email.toLowerCase()) ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return a.email.localeCompare(b.email);
+  });
 }
 
 function UsersTable() {
@@ -209,11 +219,11 @@ function UsersTable() {
   const myEmail = (me?.email ?? '').toLowerCase();
   // Subscribe so admin_access edits made elsewhere (or this row's own
   // dropdown) re-render the table immediately — directory is the source of
-  // truth for both the row identity (id) and the access array.
+  // truth for both the row identity (id), the access array, and the
+  // approved_at timestamp that drives pending vs active rendering.
   const directory = useAuthStore((s) => s.directory);
   const [q, setQ] = useState('');
   const [tick, setTick] = useState(0);
-  const [showAddUser, setShowAddUser] = useState(false);
   const [pwdTarget, setPwdTarget] = useState<DirectoryUser | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
@@ -232,7 +242,11 @@ function UsersTable() {
     return () => { void supabase.removeChannel(ch); };
   }, []);
 
-  const users = useMemo(() => listKnownUsers(), [tick]);
+  const users = useMemo(() => listKnownUsers(directory), [tick, directory]);
+  const pendingCount = useMemo(
+    () => directory.filter((p) => !p.approved_at).length,
+    [directory],
+  );
   const filtered = users.filter((u) => {
     if (!q) return true;
     const lower = q.toLowerCase();
@@ -281,23 +295,52 @@ function UsersTable() {
     setDraftName('');
   };
 
-  const handleRemove = async (u: DirectoryUser) => {
+  // Approve uses whatever role / tier / admin_access the admin set via the
+  // row pickers (defaults: viewer + Agent + []), then flips approved_at +
+  // approved_by atomically. Realtime sub on the target user's profile flips
+  // them off the /pending screen the moment this lands.
+  const handleApprove = async (u: DirectoryUser) => {
+    const p = profileFor(u.email);
+    if (!p) return;
+    try {
+      await adminApproveUser(
+        p.id,
+        p.role,
+        p.tier,
+        (p.admin_access ?? []) as AdminPanel[],
+      );
+      await refreshDirectory();
+      setTick((t) => t + 1);
+      notifySuccess(`${u.name || u.email} approved`);
+    } catch (e) {
+      notifyError('Could not approve user', e);
+    }
+  };
+
+  // Reject = full hard delete from auth.users + cascade-deleted profile.
+  // From the user's perspective their account simply "doesn't exist" — next
+  // login attempt with the same email gets the generic invalid-credentials
+  // error, exactly as if they'd never signed up. Same RPC backs the
+  // "Remove" action on already-approved users so the behaviour is uniform.
+  const handleReject = async (u: DirectoryUser, isPending: boolean) => {
     const ok = await confirm({
-      title: `Remove ${u.name || u.email}?`,
-      description: `Their boards, clients, calendar events, and files will be permanently deleted. This cannot be undone.`,
-      confirmLabel: 'Remove user',
+      title: isPending ? `Reject ${u.name || u.email}?` : `Remove ${u.name || u.email}?`,
+      description: isPending
+        ? `Their account will be permanently deleted. They can sign up again later if needed.`
+        : `Their account, boards, clients, calendar events, and files will be permanently deleted. This cannot be undone.`,
+      confirmLabel: isPending ? 'Reject' : 'Remove user',
       destructive: true,
     });
     if (!ok) return;
     const id = profileIdFor(u.email);
     if (!id) return;
     try {
-      await deleteUser(id);
+      await adminRejectUser(id);
       await refreshDirectory();
       setTick((t) => t + 1);
-      notifySuccess(`${u.name || u.email} removed`);
+      notifySuccess(isPending ? `${u.name || u.email} rejected` : `${u.name || u.email} removed`);
     } catch (e) {
-      notifyError('Could not remove user', e);
+      notifyError(isPending ? 'Could not reject user' : 'Could not remove user', e);
     }
   };
 
@@ -310,18 +353,20 @@ function UsersTable() {
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by email or name…"
             className="flex-1 text-xs outline-none bg-transparent placeholder:text-gray-300" />
         </div>
+        {pendingCount > 0 && (
+          <span
+            className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md"
+            style={{ background: '#FEF3C7', color: '#92400E' }}
+            title="New signups waiting for an admin to approve them">
+            <Clock size={10} /> {pendingCount} pending
+          </span>
+        )}
         <button
           onClick={async () => { await refreshDirectory(); setTick((t) => t + 1); }}
           title="Re-fetch the latest directory state from Supabase"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors"
           style={{ borderColor: '#E5E7EB', color: '#374151', background: 'white' }}>
           <Save size={13} /> Refresh
-        </button>
-        <button
-          onClick={() => setShowAddUser(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white hover:opacity-90 transition-opacity"
-          style={{ background: '#1EC9C4' }}>
-          <UserPlus size={13} /> Add User
         </button>
         <span className="text-xs" style={{ color: '#9CA3AF' }}>{filtered.length} of {users.length}</span>
       </div>
@@ -347,8 +392,15 @@ function UsersTable() {
               const tier = getUserTier(u.email);
               const isMe = u.email.toLowerCase() === myEmail;
               const initials = (u.name || u.email).split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase();
+              const prof = profileFor(u.email);
+              const isPending = !prof?.approved_at;
               return (
-                <tr key={u.email} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                <tr
+                  key={u.email}
+                  style={{
+                    borderBottom: '1px solid #F1F5F9',
+                    background: isPending ? '#FFFBEB' : undefined,
+                  }}>
                   <td style={{ padding: '10px 12px', verticalAlign: 'middle' }}>
                     <div className="flex items-center gap-2.5 group/name">
                       <div
@@ -381,6 +433,13 @@ function UsersTable() {
                           <button onClick={() => startEdit(u)}
                             className="opacity-0 group-hover/name:opacity-100 p-1 rounded hover:bg-gray-100 transition-all flex-shrink-0"
                             title="Rename user"><Pencil size={11} className="text-gray-400" /></button>
+                          {isPending && (
+                            <span
+                              className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                              style={{ background: '#FEF3C7', color: '#92400E' }}>
+                              <Clock size={9} /> Pending
+                            </span>
+                          )}
                           {isMe && (
                             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
                               style={{ background: '#DAF3F2', color: '#0F766E' }}>You</span>
@@ -414,21 +473,44 @@ function UsersTable() {
                   </td>
                   <td style={{ padding: '10px 12px', verticalAlign: 'middle' }}>
                     <div className="flex items-center justify-center gap-2">
-                      <button
-                        onClick={() => setPwdTarget(u)}
-                        className="text-xs font-medium px-2.5 py-1 rounded-lg border hover:bg-gray-50 transition-colors text-center"
-                        style={{ color: '#6B7280', borderColor: '#E5E7EB', minWidth: 78 }}
-                        title="Reset password for this user">
-                        Reset PW
-                      </button>
-                      <button
-                        disabled={isMe}
-                        onClick={() => handleRemove(u)}
-                        className="text-xs font-medium px-2.5 py-1 rounded-lg border hover:bg-red-50 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-center"
-                        style={{ color: '#DC2626', borderColor: '#FECACA', minWidth: 72 }}
-                        title={isMe ? "You can't remove yourself" : 'Remove user'}>
-                        Remove
-                      </button>
+                      {isPending ? (
+                        <>
+                          <button
+                            disabled={isMe}
+                            onClick={() => handleApprove(u)}
+                            className="text-xs font-semibold px-2.5 py-1 rounded-lg text-white hover:opacity-90 disabled:opacity-30 transition-opacity text-center"
+                            style={{ background: '#1EC9C4', minWidth: 78 }}
+                            title={isMe ? "You can't approve yourself" : 'Approve this user with the role / tier / admin access shown'}>
+                            Approve
+                          </button>
+                          <button
+                            disabled={isMe}
+                            onClick={() => handleReject(u, true)}
+                            className="text-xs font-medium px-2.5 py-1 rounded-lg border hover:bg-red-50 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-center"
+                            style={{ color: '#DC2626', borderColor: '#FECACA', minWidth: 72 }}
+                            title={isMe ? "You can't reject yourself" : 'Permanently delete this pending account'}>
+                            Reject
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => setPwdTarget(u)}
+                            className="text-xs font-medium px-2.5 py-1 rounded-lg border hover:bg-gray-50 transition-colors text-center"
+                            style={{ color: '#6B7280', borderColor: '#E5E7EB', minWidth: 78 }}
+                            title="Reset password for this user">
+                            Reset PW
+                          </button>
+                          <button
+                            disabled={isMe}
+                            onClick={() => handleReject(u, false)}
+                            className="text-xs font-medium px-2.5 py-1 rounded-lg border hover:bg-red-50 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-center"
+                            style={{ color: '#DC2626', borderColor: '#FECACA', minWidth: 72 }}
+                            title={isMe ? "You can't remove yourself" : 'Remove user'}>
+                            Remove
+                          </button>
+                        </>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -438,16 +520,6 @@ function UsersTable() {
         </table>
       </div>
 
-      {showAddUser && (
-        <AddUserModal
-          existingEmails={users.map((u) => u.email)}
-          onClose={() => setShowAddUser(false)}
-          // After issuing an invite, only nudge the parent to refresh — DON'T
-          // close the modal. The modal switches to the "show code" view so the
-          // admin can copy/share the code; closing is up to them.
-          onCreated={() => { setTick((t) => t + 1); }}
-        />
-      )}
       {pwdTarget && (
         <ResetPasswordModal
           target={pwdTarget}
@@ -455,140 +527,6 @@ function UsersTable() {
         />
       )}
     </section>
-  );
-}
-
-// ─── Add User modal — issues a single-use invite (real account is created
-//     when the invitee signs up with the code on the public landing page).
-function AddUserModal({ existingEmails, onClose, onCreated }: {
-  existingEmails: string[];
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [email, setEmail]   = useState('');
-  const [role,  setRole]    = useState<Role>('viewer');
-  const [tier,  setTier]    = useState<UserTier>('Agent');
-  const [busy,  setBusy]    = useState(false);
-  const [error, setError]   = useState<string | null>(null);
-  const [issued, setIssued] = useState<Invite | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', h);
-    return () => document.removeEventListener('keydown', h);
-  }, [onClose]);
-
-  const validEmail = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
-  const existingSet = useMemo(() => new Set(existingEmails.map((e) => e.toLowerCase())), [existingEmails]);
-
-  const submit = async () => {
-    setError(null);
-    if (!validEmail(email))                    { setError('Please enter a valid email.'); return; }
-    if (existingSet.has(email.toLowerCase()))  { setError('A user with this email already exists.'); return; }
-    if (role === 'master_admin')               { setError('Master Admin cannot be granted via invite.'); return; }
-
-    setBusy(true);
-    try {
-      const invite = await createInvite({ email: email.trim().toLowerCase(), role, tier });
-      setIssued(invite);
-      onCreated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create invite');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const copy = async () => {
-    if (!issued) return;
-    try { await navigator.clipboard.writeText(issued.code); setCopied(true); setTimeout(() => setCopied(false), 1500); }
-    catch { /* ignore */ }
-  };
-
-  // Master Admin can't be assigned via this form — it's gated to a single account.
-  const invitableRoles = ROLES.filter((r) => r.id !== 'master_admin');
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
-      <div className="bg-white rounded-2xl w-[440px] overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
-        <div className="flex items-start justify-between px-6 pt-5 pb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#DAF3F2' }}>
-              <UserPlus size={15} style={{ color: '#0F766E' }} />
-            </div>
-            <div>
-              <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Invite user</h3>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
-                {issued ? 'Share the code below — it expires in 14 days' : 'Issue a one-time code; the invitee signs up themselves'}
-              </p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100"><X size={15} className="text-gray-400" /></button>
-        </div>
-
-        {issued ? (
-          <div className="px-6 pb-5 space-y-4">
-            <div className="rounded-xl border px-3 py-3" style={{ borderColor: '#D1F2EF', background: '#F0FBFA' }}>
-              <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#0F766E' }}>Invite code for {issued.email}</p>
-              <div className="mt-2 flex items-center gap-2">
-                <code className="flex-1 text-lg font-mono font-bold tracking-[0.18em] text-center py-2 rounded-lg"
-                  style={{ background: 'white', color: '#0F766E', border: '1px solid #D1F2EF' }}>{issued.code}</code>
-                <button onClick={copy}
-                  className="px-2.5 py-2 rounded-lg text-[11px] font-semibold flex items-center gap-1 hover:bg-[#DAF3F2]"
-                  style={{ color: '#0F766E', border: '1px solid #D1F2EF', background: 'white' }}>
-                  {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
-                </button>
-              </div>
-            </div>
-            <p className="text-[11px]" style={{ color: '#6B7280' }}>
-              Send this to <strong>{issued.email}</strong> along with the sign-up URL. They'll be promoted to{' '}
-              <strong>{ROLES.find((r) => r.id === issued.role)?.label}</strong> automatically once they redeem it.
-            </p>
-          </div>
-        ) : (
-          <div className="px-6 pb-5 space-y-4">
-            <Field label="Email">
-              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@whyestate.com" type="email"
-                className="w-full px-3 py-2 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
-                style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-            </Field>
-            <Field label="Tier">
-              <select value={tier} onChange={(e) => setTier(e.target.value as UserTier)}
-                className="w-full px-3 py-2 rounded-lg border outline-none text-sm bg-white"
-                style={{ borderColor: '#E5E7EB' }}>
-                {USER_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </Field>
-            <Field label="Permission">
-              <select value={role} onChange={(e) => setRole(e.target.value as Role)}
-                className="w-full px-3 py-2 rounded-lg border outline-none text-sm bg-white"
-                style={{ borderColor: '#E5E7EB' }}>
-                {invitableRoles.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
-              </select>
-            </Field>
-            {error && (
-              <div className="flex items-start gap-2 px-3 py-2 rounded-lg text-xs" style={{ background: '#FEE2E2', color: '#991B1B' }}>
-                <AlertCircle size={13} className="mt-0.5 flex-shrink-0" /> <span>{error}</span>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
-          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">
-            {issued ? 'Done' : 'Cancel'}
-          </button>
-          {!issued && (
-            <button onClick={submit} disabled={busy}
-              className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ background: '#1EC9C4' }}>
-              {busy ? 'Issuing…' : 'Issue invite'}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -665,15 +603,6 @@ function ResetPasswordModal({ target, onClose }: { target: DirectoryUser; onClos
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="text-[11px] font-bold uppercase tracking-wider mb-1.5 block" style={{ color: '#6B7280' }}>{label}</label>
-      {children}
     </div>
   );
 }

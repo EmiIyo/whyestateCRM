@@ -35,6 +35,13 @@ export default function RequireAuth({
   }
   if (!user) return <Navigate to="/" replace />;
 
+  // Pending user — admin hasn't approved them yet. Every protected route
+  // funnels here. The realtime sub on the user's own profile flips them
+  // off this screen automatically the moment approved_at lands.
+  if (!profile?.approved_at) {
+    return <Navigate to={ROUTE_PATHS.PENDING} replace />;
+  }
+
   const role: Role = profile?.role ?? 'viewer';
   const access = profile?.admin_access ?? [];
 

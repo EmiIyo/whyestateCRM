@@ -4,7 +4,7 @@ import {
   ArrowRight, LayoutGrid, Filter, Users, FileSpreadsheet, ShieldCheck, Zap, Check,
 } from 'lucide-react';
 import AuthModal from '@/components/AuthModal';
-import { isAuthed } from '@/lib/auth';
+import { isAuthed, isApproved } from '@/lib/auth';
 import { ROUTE_PATHS } from '@/lib/index';
 
 export default function Landing() {
@@ -12,9 +12,11 @@ export default function Landing() {
   const [authMode, setAuthMode]   = useState<'signin' | 'signup'>('signin');
   const navigate = useNavigate();
 
-  // If user is already authed, jump straight into the CRM.
+  // Already-authed users skip the landing. Pending ones go to /pending so they
+  // see the waiting screen instead of the marketing site.
   useEffect(() => {
-    if (isAuthed()) navigate(ROUTE_PATHS.LEADS, { replace: true });
+    if (!isAuthed()) return;
+    navigate(isApproved() ? ROUTE_PATHS.LEADS : ROUTE_PATHS.PENDING, { replace: true });
   }, [navigate]);
 
   const open = (mode: 'signin' | 'signup') => { setAuthMode(mode); setAuthOpen(true); };

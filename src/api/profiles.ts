@@ -67,17 +67,37 @@ export async function adminSetAdminAccess(userId: string, access: AdminPanel[]):
   if (error) throw error;
 }
 
+// Approve a pending user, assigning role + tier + admin_access atomically.
+// approved_at + approved_by are set server-side; once it lands, the user's
+// realtime profile sub fires and they immediately get full access.
+export async function adminApproveUser(
+  userId: string,
+  role: AppRole,
+  tier: UserTier,
+  adminAccess: AdminPanel[],
+): Promise<void> {
+  const { error } = await supabase.rpc('admin_approve_user', {
+    p_user_id: userId,
+    p_role: role,
+    p_tier: tier,
+    p_admin_access: adminAccess,
+  });
+  if (error) throw error;
+}
+
+// Reject = hard delete from auth.users (the profile row cascades). After
+// this, the rejected user trying to log in gets the same generic
+// "invalid login credentials" error they'd see if they'd never signed up.
+export async function adminRejectUser(userId: string): Promise<void> {
+  const { error } = await supabase.rpc('admin_reject_user', { p_user_id: userId });
+  if (error) throw error;
+}
+
 export async function adminUpdateProfile(userId: string, patch: {
   display_name?: string;
   avatar_color?: string;
   avatar_url?: string | null;
 }): Promise<void> {
   const { error } = await supabase.from('profiles').update(patch).eq('id', userId);
-  if (error) throw error;
-}
-
-export async function deleteUser(userId: string): Promise<void> {
-  // Cascades through profile (auth.users row stays — admin must remove via dashboard).
-  const { error } = await supabase.from('profiles').delete().eq('id', userId);
   if (error) throw error;
 }

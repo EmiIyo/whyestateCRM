@@ -9,6 +9,7 @@ import RequireAuth from "@/components/RequireAuth";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ConfirmHost } from "@/components/ConfirmDialog";
 import Landing from "@/pages/Landing";
+import Pending from "@/pages/Pending";
 import ProspectHub from "@/pages/ProspectHub";
 import AdminControl from "@/pages/AdminControl";
 import MyProfile from "@/pages/MyProfile";
@@ -31,6 +32,7 @@ const App = () => (
       <HashRouter>
         <Routes>
           <Route path={ROUTE_PATHS.HOME} element={<Landing />} />
+          <Route path={ROUTE_PATHS.PENDING} element={<Pending />} />
 
           <Route path={ROUTE_PATHS.LEADS}      element={<RequireAuth permission="nav.leads"><Layout><ProspectHub /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.DASHBOARD}  element={<RequireAuth permission="nav.dashboard"><Layout><Dashboard /></Layout></RequireAuth>} />

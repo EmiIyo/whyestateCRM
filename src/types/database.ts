@@ -441,45 +441,6 @@ export type Database = {
         }
         Relationships: []
       }
-      invites: {
-        Row: {
-          code: string
-          created_at: string
-          created_by: string | null
-          email: string
-          expires_at: string
-          id: string
-          role: Database["public"]["Enums"]["app_role"]
-          tier: Database["public"]["Enums"]["user_tier"]
-          used_at: string | null
-          used_by: string | null
-        }
-        Insert: {
-          code: string
-          created_at?: string
-          created_by?: string | null
-          email: string
-          expires_at?: string
-          id?: string
-          role?: Database["public"]["Enums"]["app_role"]
-          tier?: Database["public"]["Enums"]["user_tier"]
-          used_at?: string | null
-          used_by?: string | null
-        }
-        Update: {
-          code?: string
-          created_at?: string
-          created_by?: string | null
-          email?: string
-          expires_at?: string
-          id?: string
-          role?: Database["public"]["Enums"]["app_role"]
-          tier?: Database["public"]["Enums"]["user_tier"]
-          used_at?: string | null
-          used_by?: string | null
-        }
-        Relationships: []
-      }
       photo_batch_items: {
         Row: {
           active_version: number
@@ -561,6 +522,8 @@ export type Database = {
       profiles: {
         Row: {
           admin_access: string[]
+          approved_at: string | null
+          approved_by: string | null
           avatar_color: string
           avatar_url: string | null
           created_at: string
@@ -573,6 +536,8 @@ export type Database = {
         }
         Insert: {
           admin_access?: string[]
+          approved_at?: string | null
+          approved_by?: string | null
           avatar_color?: string
           avatar_url?: string | null
           created_at?: string
@@ -585,6 +550,8 @@ export type Database = {
         }
         Update: {
           admin_access?: string[]
+          approved_at?: string | null
+          approved_by?: string | null
           avatar_color?: string
           avatar_url?: string | null
           created_at?: string
@@ -716,6 +683,19 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      admin_approve_user: {
+        Args: {
+          p_user_id: string
+          p_role: Database["public"]["Enums"]["app_role"]
+          p_tier: Database["public"]["Enums"]["user_tier"]
+          p_admin_access: string[]
+        }
+        Returns: undefined
+      }
+      admin_reject_user: {
+        Args: { p_user_id: string }
+        Returns: undefined
+      }
       admin_set_user_role: {
         Args: {
           p_role: Database["public"]["Enums"]["app_role"]
@@ -740,10 +720,6 @@ export type Database = {
       import_prospect_to_client: {
         Args: { p_prospect_id: string }
         Returns: Database["public"]["Tables"]["clients"]["Row"]
-      }
-      redeem_invite: {
-        Args: { p_code: string }
-        Returns: Database["public"]["Enums"]["app_role"]
       }
     }
     Enums: {

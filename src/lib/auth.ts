@@ -157,6 +157,13 @@ export function isAuthed(): boolean {
   return useAuthStore.getState().user !== null;
 }
 
+// `approved_at` is null while a freshly-signed-up user waits for an admin to
+// approve them in User Setting. Until then the app routes them to /pending
+// and refuses access to every protected module.
+export function isApproved(): boolean {
+  return !!useAuthStore.getState().profile?.approved_at;
+}
+
 export function getCurrentUser(): AuthUser | null {
   return useAuthStore.getState().user;
 }

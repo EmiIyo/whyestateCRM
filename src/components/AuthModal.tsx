@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { X, Mail, Lock, User as UserIcon, Loader2, KeyRound, ArrowLeft, Check, AlertCircle } from 'lucide-react';
+import { X, Mail, Lock, User as UserIcon, Loader2, ArrowLeft, Check, AlertCircle } from 'lucide-react';
 import { signIn, signUp, requestPasswordReset, setPassword, useAuthStore } from '@/lib/auth';
-import { redeemInvite } from '@/api/invites';
 import { getMyProfile } from '@/api/profiles';
 import { refreshPermissions } from '@/lib/permissions';
 import { ROUTE_PATHS } from '@/lib/index';
@@ -23,7 +22,6 @@ export default function AuthModal({
   const [password, setPwd]  = useState('');
   const [confirm, setConfirm] = useState('');
   const [name, setName]     = useState('');
-  const [inviteCode, setInviteCode] = useState('');
   const [error, setError]   = useState<string | null>(null);
   const [busy, setBusy]     = useState(false);
   const navigate = useNavigate();
@@ -42,52 +40,38 @@ export default function AuthModal({
     if (mode === 'signup') {
       if (!name.trim())            { setError('Please enter your name.'); return; }
       if (password !== confirm)    { setError('Passwords do not match.'); return; }
-      // Invite code is optional — without one the new account joins as "viewer".
     }
 
     setBusy(true);
     try {
       if (mode === 'signup') {
         await signUp(email, password, name);
-
-        // `bootAuth`'s onAuthStateChange listener populates the store async.
-        // Poll briefly so the next steps see a user with a session — without
-        // this we can navigate to /leads while the store still has user=null,
-        // which causes the "flash to home, then back" jitter the user saw.
-        for (let i = 0; i < 30; i++) {
-          if (useAuthStore.getState().user) break;
-          await new Promise((r) => setTimeout(r, 100));
-        }
-
-        if (inviteCode.trim()) {
-          // Best-effort redeem; failures surface in the UI but don't block sign-up.
-          try { await redeemInvite(inviteCode.trim()); }
-          catch (err) {
-            setError(err instanceof Error ? err.message : 'Invite code rejected — account created as viewer.');
-            // Still navigate — user is signed in either way.
-          }
-        }
-
-        // The auth subscriber may have already fetched the profile with the
-        // pre-redeem role. Re-pull it so the in-memory copy carries the role
-        // the user was just granted, otherwise ProspectHub mounts with stale
-        // permissions and renders the wrong empty state.
-        try {
-          const fresh = await getMyProfile();
-          if (fresh) useAuthStore.getState().setProfile(fresh);
-        } catch { /* non-fatal */ }
-        // Pull the permission matrix so canDo() works on first render.
-        await refreshPermissions().catch(() => { /* non-fatal */ });
       } else {
         await signIn(email, password);
-        // Same trick on sign-in: wait for the subscriber to land.
-        for (let i = 0; i < 30; i++) {
-          if (useAuthStore.getState().user) break;
-          await new Promise((r) => setTimeout(r, 100));
-        }
       }
+
+      // `bootAuth`'s onAuthStateChange listener populates the store async.
+      // Poll briefly so the next steps see a user with a session — without
+      // this we can navigate while the store still has user=null, causing
+      // the "flash, bounce back" jitter.
+      for (let i = 0; i < 30; i++) {
+        if (useAuthStore.getState().user) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      // Pull the freshest profile so the routing branch below sees the
+      // current approved_at (the very first master sign-up is auto-approved
+      // by the handle_new_user trigger — others land pending).
+      try {
+        const fresh = await getMyProfile();
+        if (fresh) useAuthStore.getState().setProfile(fresh);
+      } catch { /* non-fatal */ }
+      // Pull the permission matrix so canDo() works on first render.
+      await refreshPermissions().catch(() => { /* non-fatal */ });
+
       onClose();
-      navigate(ROUTE_PATHS.LEADS, { replace: true });
+      const approved = !!useAuthStore.getState().profile?.approved_at;
+      navigate(approved ? ROUTE_PATHS.LEADS : ROUTE_PATHS.PENDING, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Authentication failed.');
     } finally {
@@ -179,15 +163,8 @@ export default function AuthModal({
                     className="w-full pl-9 pr-3 py-2.5 rounded-lg border outline-none text-sm focus:border-[#1EC9C4]"
                     style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
                 </Field>
-
-                <Field label="Invite Code (optional)" icon={<KeyRound size={14} />}>
-                  <input value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} placeholder="Provided by an admin"
-                    autoComplete="off" autoCapitalize="off" spellCheck={false}
-                    className="w-full pl-9 pr-3 py-2.5 rounded-lg border outline-none text-sm font-mono focus:border-[#1EC9C4]"
-                    style={{ borderColor: '#E5E7EB', background: '#FAFBFC' }} />
-                </Field>
                 <p className="text-[11px]" style={{ color: '#9CA3AF' }}>
-                  Without a code your account starts as a viewer — an admin can promote you later.
+                  An admin will review your account and grant access after sign-up.
                 </p>
               </>
             )}
