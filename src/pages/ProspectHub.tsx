@@ -196,11 +196,16 @@ function generateDemoSeed(ownerEmail: string, ownerName: string, boardCount = 50
 // ─── New Board Modal ──────────────────────────────────────────────────────────
 function NewBoardModal({ onClose, onCreate }: {
   onClose: () => void;
-  onCreate: (name: string, location: string, color: string) => void;
+  // Returns a Promise so the modal can wait + surface errors instead of
+  // closing optimistically. The parent is responsible for actually awaiting
+  // the DB write — see createBoard in PaginatedProspectHub.
+  onCreate: (name: string, location: string, color: string) => Promise<void>;
 }) {
   const [name, setName]         = useState('');
   const [location, setLocation] = useState('');
   const [color, setColor]       = useState(BOARD_COLORS[0]);
+  const [busy, setBusy]         = useState(false);
+  const [error, setError]       = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -208,10 +213,20 @@ function NewBoardModal({ onClose, onCreate }: {
     ? name.trim().split(/\s+/).slice(0, 2).map((w) => w[0].toUpperCase()).join('')
     : 'BD';
 
-  const submit = () => {
-    if (!name.trim()) return;
-    onCreate(name.trim(), location.trim(), color);
-    onClose();
+  const submit = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onCreate(name.trim(), location.trim(), color);
+      onClose();
+    } catch (e) {
+      // Keep the modal open so the user sees what went wrong instead of
+      // having a toast flash and disappear off the bottom of the screen.
+      setError(e instanceof Error ? e.message : 'Could not create board');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -292,11 +307,23 @@ function NewBoardModal({ onClose, onCreate }: {
           </div>
         </div>
 
+        {error && (
+          <div className="mx-6 mb-2 px-3 py-2 rounded-lg text-xs flex items-start gap-2"
+            style={{ background: '#FEE2E2', color: '#991B1B' }}>
+            <span className="flex-1 min-w-0 break-words">{error}</span>
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100" style={{ background: '#F8FAFB' }}>
-          <button onClick={onClose} className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
-          <button onClick={submit} disabled={!name.trim()}
-            className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40"
-            style={{ background: color }}>Create Board</button>
+          <button onClick={onClose} disabled={busy}
+            className="px-4 py-1.5 rounded-xl text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+            Cancel
+          </button>
+          <button onClick={submit} disabled={!name.trim() || busy}
+            className="px-5 py-1.5 rounded-xl text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: color }}>
+            {busy ? 'Creating…' : 'Create Board'}
+          </button>
         </div>
       </div>
     </div>
@@ -5091,7 +5118,6 @@ export default function ProspectHub() {
         />
       )}
       {showAddField && <AddFieldModal onClose={() => setShowAddField(false)} onAdd={addCustomField} />}
-      {showNewBoard && <NewBoardModal onClose={() => setShowNewBoard(false)} onCreate={createBoard} />}
       {manageBoardId && (() => {
         const b = boards.find((x) => x.id === manageBoardId);
         if (!b) return null;
@@ -5167,6 +5193,15 @@ export default function ProspectHub() {
         </div>
       )}
       </>)}
+
+      {/* NewBoardModal lives OUTSIDE the `!hubIsTrulyEmpty` gate so the empty
+          state's "+ New Board" CTA can actually open it — before this fix the
+          modal was rendered conditionally with the rest of the hub UI, so
+          clicking "+ New Board" from the empty card silently set state with
+          nothing to mount. */}
+      {showNewBoard && (
+        <NewBoardModal onClose={() => setShowNewBoard(false)} onCreate={createBoard} />
+      )}
     </div>
   );
 }
