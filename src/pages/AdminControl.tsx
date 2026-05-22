@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ShieldCheck, Check, RotateCcw, Save, ChevronLeft, ChevronRight, Settings2, Search, Users as UsersIcon,
-  KeyRound, X, AlertCircle, Pencil, ChevronDown, Clock,
+  KeyRound, X, AlertCircle, Pencil, ChevronDown, Clock, Loader2,
 } from 'lucide-react';
 import {
   PERMISSIONS, PERMISSION_GROUPS, ROLES,
@@ -19,7 +19,7 @@ import {
 import { loadRolePerms } from '@/api/permissions';
 import {
   adminUpdateProfile, adminSetUserTier, adminApproveUser, adminRejectUser,
-  adminSetAdminAccess, ADMIN_PANELS, type AdminPanel,
+  adminSetAdminAccess, listProfiles, ADMIN_PANELS, type AdminPanel,
 } from '@/api/profiles';
 import { supabase } from '@/lib/supabase';
 import { confirm } from '@/components/ConfirmDialog';
@@ -199,18 +199,24 @@ function UserSetting({ onBack }: { onBack: () => void }) {
 // localStorage `we.crm.state` merge is gone — every user is now a real
 // Supabase Auth account, and the trigger handle_new_user keeps profiles in
 // sync on every signup.
-// Sort pending users (approved_at IS NULL) to the top so admins see fresh
-// signup requests first; within each group keep alphabetical-by-email so the
-// list doesn't reshuffle on every realtime tick.
+// Sort priority:
+//   1. Master Admin — always row 1 (anchored "you"-style identity at the top)
+//   2. Everyone else — newest signup first (created_at desc)
+// Newest-first naturally surfaces pending users since they just signed up,
+// so the explicit pending-on-top tie-break we used to have is no longer
+// needed. ISO timestamps sort lexically === chronologically, so a plain
+// string compare is sound.
 function listKnownUsers(directory: ReturnType<typeof useAuthStore.getState>['directory']): DirectoryUser[] {
-  const pendingEmails = new Set(
-    directory.filter((p) => !p.approved_at).map((p) => p.email.toLowerCase()),
+  const profileByEmail = new Map(
+    directory.map((p) => [p.email.toLowerCase(), p] as const),
   );
   return [...listAllUsers()].sort((a, b) => {
-    const ap = pendingEmails.has(a.email.toLowerCase()) ? 0 : 1;
-    const bp = pendingEmails.has(b.email.toLowerCase()) ? 0 : 1;
-    if (ap !== bp) return ap - bp;
-    return a.email.localeCompare(b.email);
+    const pa = profileByEmail.get(a.email.toLowerCase());
+    const pb = profileByEmail.get(b.email.toLowerCase());
+    const ma = pa?.role === 'master_admin' ? 0 : 1;
+    const mb = pb?.role === 'master_admin' ? 0 : 1;
+    if (ma !== mb) return ma - mb;
+    return b.firstSeen.localeCompare(a.firstSeen);
   });
 }
 
@@ -224,6 +230,7 @@ function UsersTable() {
   const directory = useAuthStore((s) => s.directory);
   const [q, setQ] = useState('');
   const [tick, setTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   const [pwdTarget, setPwdTarget] = useState<DirectoryUser | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
@@ -362,11 +369,29 @@ function UsersTable() {
           </span>
         )}
         <button
-          onClick={async () => { await refreshDirectory(); setTick((t) => t + 1); }}
+          disabled={refreshing}
+          onClick={async () => {
+            if (refreshing) return;
+            setRefreshing(true);
+            try {
+              // Use listProfiles directly (not refreshDirectory) so we can
+              // surface errors — refreshDirectory swallows them, which is
+              // why a broken Refresh click looked like a no-op before.
+              const rows = await listProfiles();
+              useAuthStore.getState().setDirectory(rows);
+              setTick((t) => t + 1);
+              notifySuccess('Directory refreshed');
+            } catch (e) {
+              notifyError('Could not refresh directory', e);
+            } finally {
+              setRefreshing(false);
+            }
+          }}
           title="Re-fetch the latest directory state from Supabase"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           style={{ borderColor: '#E5E7EB', color: '#374151', background: 'white' }}>
-          <Save size={13} /> Refresh
+          {refreshing ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+          {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
         <span className="text-xs" style={{ color: '#9CA3AF' }}>{filtered.length} of {users.length}</span>
       </div>
