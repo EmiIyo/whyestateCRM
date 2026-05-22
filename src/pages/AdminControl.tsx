@@ -6,6 +6,7 @@ import {
 import {
   PERMISSIONS, PERMISSION_GROUPS, ROLES,
   resetRolePerms,
+  saveRolePerms as saveRolePermsToStore,
   getUserRole, setUserRole,
   type Role, type RolePerms,
 } from '@/lib/permissions';
@@ -14,7 +15,7 @@ import {
   getAvatarColor, getAvatarImage, getUserTier, USER_TIERS,
   type DirectoryUser, type UserTier,
 } from '@/lib/auth';
-import { loadRolePerms, saveRolePerms as saveRolePermsApi } from '@/api/permissions';
+import { loadRolePerms } from '@/api/permissions';
 import { adminUpdateProfile, adminSetUserTier, deleteUser } from '@/api/profiles';
 import { createInvite, listInvites, revokeInvite, type Invite } from '@/api/invites';
 import { supabase } from '@/lib/supabase';
@@ -647,12 +648,10 @@ function ProspectHubSettings({ onBack }: { onBack: () => void }) {
 
   const save = async () => {
     try {
-      // Save only the editable rows.
-      await Promise.all([
-        saveRolePermsApi('admin',  perms.admin),
-        saveRolePermsApi('editor', perms.editor),
-        saveRolePermsApi('viewer', perms.viewer),
-      ]);
+      // Save through the lib helper — it writes to DB AND updates
+      // `usePermsStore` in one go, so every page (sidebar, ProspectHub
+      // buttons, modals) reflects the change instantly without a refresh.
+      await saveRolePermsToStore(perms);
       setSaved(perms);
       notifySuccess('Permissions saved');
     } catch (e) { notifyError('Could not save permissions', e); }
