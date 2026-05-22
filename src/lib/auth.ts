@@ -61,6 +61,35 @@ export const useAuthStore = create<AuthState>((set) => ({
 
 // ─── Boot: hydrate session + listen for auth changes ──────────────────────
 let booted = false;
+// Realtime channel watching the CURRENT user's profile row so role / tier /
+// admin_access edits made by an admin on another device (or by master in
+// the same tab) flow into the local store without needing a refresh. Kept
+// at module scope so we can tear it down on sign-out and swap it on session
+// change. Without this, granting admin_access to user B only updates B's
+// sidebar after a hard reload — see the AdminControl picker for the path
+// that triggers it.
+let meProfileCh: ReturnType<typeof supabase.channel> | null = null;
+
+async function subscribeToMyProfile(userId: string): Promise<void> {
+  // Tear down any previous subscription (e.g. previous session) before
+  // attaching a new one to the new user.
+  if (meProfileCh) {
+    try { await supabase.removeChannel(meProfileCh); } catch { /* ignore */ }
+    meProfileCh = null;
+  }
+  meProfileCh = supabase
+    .channel(`me-profile-${userId}`)
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${userId}` },
+      async () => {
+        const fresh = await getProfile(userId);
+        if (fresh) useAuthStore.getState().setProfile(fresh);
+      },
+    )
+    .subscribe();
+}
+
 export async function bootAuth(): Promise<void> {
   if (booted) return;
   booted = true;
@@ -73,6 +102,7 @@ export async function bootAuth(): Promise<void> {
       profile,
     );
     void refreshDirectory();
+    void subscribeToMyProfile(session.user.id);
   }
   useAuthStore.getState().setReady(true);
 
@@ -80,6 +110,10 @@ export async function bootAuth(): Promise<void> {
     if (!sess?.user) {
       useAuthStore.getState().setSession(null, null);
       useAuthStore.getState().setDirectory([]);
+      if (meProfileCh) {
+        try { await supabase.removeChannel(meProfileCh); } catch { /* ignore */ }
+        meProfileCh = null;
+      }
       return;
     }
     const profile = await getProfile(sess.user.id);
@@ -88,6 +122,7 @@ export async function bootAuth(): Promise<void> {
       profile,
     );
     void refreshDirectory();
+    void subscribeToMyProfile(sess.user.id);
   });
 }
 

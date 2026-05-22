@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ShieldCheck, Check, RotateCcw, Save, ChevronLeft, ChevronRight, Settings2, Search, Users as UsersIcon,
   KeyRound, UserPlus, X, AlertCircle, Pencil, Copy, ChevronDown,
@@ -92,58 +93,78 @@ function AdminMain({ onOpenProspectHub, onOpenUserSetting, onOpenSidebarPermissi
         </div>
       </div>
 
-      {/* Two columns max — User Setting + Prospect Hub Permissions fill the
-          first row; Sidebar Permissions sits on the second row at the same
-          column width. Each card only renders when the current user has
-          access to that panel (master_admin always sees everything). */}
+      {/* All three cards always render so every admin sees the full landscape.
+          Cards the current user can't open are disabled with a "Locked" badge
+          — they can see what exists without being able to navigate in. */}
       <p className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: '#9CA3AF' }}>Modules</p>
       <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
-        {canUsers && (
-          <button onClick={onOpenUserSetting}
-            className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
-            style={{ borderColor: '#E5E7EB' }}>
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#FEF3C7' }}>
-              <UsersIcon size={18} style={{ color: '#92400E' }} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-bold" style={{ color: '#1A202C' }}>User Setting</p>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Assign a role to each user</p>
-            </div>
-            <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
-          </button>
-        )}
-
-        {canProspectHubPerms && (
-          <button onClick={onOpenProspectHub}
-            className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
-            style={{ borderColor: '#E5E7EB' }}>
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#DAF3F2' }}>
-              <Settings2 size={18} style={{ color: '#0F766E' }} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Prospect Hub Permissions</p>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>What each role can do inside Prospect Hub</p>
-            </div>
-            <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
-          </button>
-        )}
-
-        {canSidebarPerms && (
-          <button onClick={onOpenSidebarPermissions}
-            className="text-left rounded-2xl border bg-white p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg flex items-start gap-3"
-            style={{ borderColor: '#E5E7EB' }}>
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#E0F2FE' }}>
-              <ChevronRight size={18} style={{ color: '#0369A1' }} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-bold" style={{ color: '#1A202C' }}>Sidebar Permissions</p>
-              <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>Which modules each role can see in the sidebar</p>
-            </div>
-            <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
-          </button>
-        )}
+        <AdminCard
+          accessible={canUsers}
+          onOpen={onOpenUserSetting}
+          iconBg="#FEF3C7"
+          icon={<UsersIcon size={18} style={{ color: '#92400E' }} />}
+          title="User Setting"
+          description="Assign a role to each user"
+        />
+        <AdminCard
+          accessible={canProspectHubPerms}
+          onOpen={onOpenProspectHub}
+          iconBg="#DAF3F2"
+          icon={<Settings2 size={18} style={{ color: '#0F766E' }} />}
+          title="Prospect Hub Permissions"
+          description="What each role can do inside Prospect Hub"
+        />
+        <AdminCard
+          accessible={canSidebarPerms}
+          onOpen={onOpenSidebarPermissions}
+          iconBg="#E0F2FE"
+          icon={<ChevronRight size={18} style={{ color: '#0369A1' }} />}
+          title="Sidebar Permissions"
+          description="Which modules each role can see in the sidebar"
+        />
       </div>
     </div>
+  );
+}
+
+// ─── Single landing card — same shape whether the user can open it or not.
+// `accessible=false` dims the card and disables click; this way a delegated
+// admin can still see the full set of panels that exist in the workspace,
+// they just can't navigate into the ones they weren't granted. The route
+// guard inside `AdminControl` enforces access at the navigation level, so
+// disabling the button is purely a UX shortcut to avoid the bounce-back.
+function AdminCard({ accessible, onOpen, icon, iconBg, title, description }: {
+  accessible: boolean;
+  onOpen: () => void;
+  icon: React.ReactNode;
+  iconBg: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <button
+      disabled={!accessible}
+      onClick={onOpen}
+      title={accessible ? undefined : 'You do not have access to this panel'}
+      className="text-left rounded-2xl border bg-white p-5 transition-all flex items-start gap-3 enabled:hover:-translate-y-0.5 enabled:hover:shadow-lg disabled:opacity-55 disabled:cursor-not-allowed"
+      style={{ borderColor: '#E5E7EB' }}>
+      <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: iconBg }}>
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-bold" style={{ color: '#1A202C' }}>{title}</p>
+        <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>{description}</p>
+      </div>
+      {accessible ? (
+        <ChevronRight size={16} style={{ color: '#9CA3AF' }} />
+      ) : (
+        <span
+          className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded flex-shrink-0"
+          style={{ background: '#F3F4F6', color: '#9CA3AF' }}>
+          Locked
+        </span>
+      )}
+    </button>
   );
 }
 
@@ -377,9 +398,11 @@ function UsersTable() {
                   <td style={{ padding: '10px 12px', verticalAlign: 'middle' }}>
                     <AdminAccessPicker
                       access={(profileFor(u.email)?.admin_access ?? []) as AdminPanel[]}
-                      // Master Admin already has inherent full access; editing
-                      // admin_access on that row is meaningless, so lock it.
-                      locked={role === 'master_admin'}
+                      // Master Admin has inherent full access through the role
+                      // bypass, so the `admin_access` array is meaningless for
+                      // them — surface that as an "All" lock instead of a
+                      // misleading "0 permissions" count.
+                      role={role}
                       onChange={(next) => handleAdminAccessChange(u.email, next)}
                     />
                   </td>
@@ -691,28 +714,64 @@ function TierPicker({ value, onChange }: { value: UserTier; onChange: (t: UserTi
 // ─── Admin Access picker — compact dropdown with one checkbox per sub-panel.
 // Per-user delegation of which Admin Control panels they can open. A user
 // with zero entries here does not see the Admin Control sidebar item at all.
-// Master Admin gets a locked "Full" pill since their access is inherent.
-function AdminAccessPicker({ access, locked, onChange }: {
+// Identical UI for every row, including master_admin — the master role gets
+// inherent full access via role checks elsewhere, so what's stored here is
+// purely informational for them, but stays editable for consistency.
+//
+// The dropdown is portal-rendered to `document.body` (so the table wrapper's
+// `overflow-hidden` — needed for the rounded corners — doesn't clip it on
+// rows near the bottom of the page) and always opens downward, exactly as
+// requested.
+function AdminAccessPicker({ access, role, onChange }: {
   access: AdminPanel[];
-  locked?: boolean;
+  role: Role;
   onChange: (next: AdminPanel[]) => Promise<void> | void;
 }) {
+  // Master Admin always has full access through the role bypass. The pill
+  // shows "All" locked so it doesn't look like they were granted 0 panels.
+  const isMaster = role === 'master_admin';
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const ddRef  = useRef<HTMLDivElement   | null>(null);
 
-  // Close on outside click + Escape.
+  const place = () => {
+    const btn = btnRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    setCoords({
+      top:   rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    });
+  };
+
+  // Open/close handlers — recompute position every open so it follows the
+  // current scroll offset.
+  const handleOpen = () => { place(); setOpen(true); };
+  const handleClose = () => setOpen(false);
+
+  // Close on outside click, Escape, scroll, or resize.
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t)) return;
+      if (ddRef.current?.contains(t))  return;
+      setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onKey    = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onScroll = () => setOpen(false);
     document.addEventListener('mousedown', onDoc);
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown',   onKey);
+    // useCapture so we catch scrolls on inner scroll containers too.
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
     return () => {
       document.removeEventListener('mousedown', onDoc);
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown',   onKey);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
     };
   }, [open]);
 
@@ -725,32 +784,44 @@ function AdminAccessPicker({ access, locked, onChange }: {
     finally { setBusy(false); }
   };
 
-  const count = access.length;
-  const active = locked || count > 0;
-  const label = locked ? 'Full' : `${count} permission${count === 1 ? '' : 's'}`;
+  const count  = access.length;
+  const active = isMaster || count > 0;
+  const label  = isMaster ? 'All' : `${count} permission${count === 1 ? '' : 's'}`;
+
+  const ddStyle: React.CSSProperties = coords
+    ? {
+        position: 'fixed',
+        top:   coords.top,
+        right: coords.right,
+        borderColor: '#E5E7EB',
+        background:  'white',
+        boxShadow:   '0 10px 30px rgba(0,0,0,0.12)',
+      }
+    : { display: 'none' };
 
   return (
-    <div ref={wrapRef} className="relative inline-block">
+    <>
       <button
+        ref={btnRef}
         type="button"
-        disabled={locked}
-        onClick={() => setOpen((v) => !v)}
-        title={locked ? 'Master Admin has inherent full access' : 'Choose which Admin Control panels this user can open'}
-        className="text-xs font-semibold border rounded-lg px-2.5 py-1.5 outline-none cursor-pointer focus:border-[#1EC9C4] disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+        disabled={isMaster}
+        onClick={() => (open ? handleClose() : handleOpen())}
+        title={isMaster
+          ? 'Master Admin has full access through their role — no explicit grants needed'
+          : 'Choose which Admin Control panels this user can open'}
+        className="text-xs font-semibold border rounded-lg px-2.5 py-1.5 outline-none focus:border-[#1EC9C4] inline-flex items-center gap-1.5 disabled:cursor-not-allowed enabled:cursor-pointer"
         style={{
           background: active ? '#DAF3F2' : '#F3F4F6',
-          color: active ? '#0F766E' : '#6B7280',
+          color:      active ? '#0F766E' : '#6B7280',
           borderColor: 'transparent',
           minWidth: 140,
-          opacity: locked ? 0.7 : 1,
+          opacity: isMaster ? 0.85 : 1,
         }}>
         <span className="flex-1 text-left">{label}</span>
-        {!locked && <ChevronDown size={12} />}
+        {!isMaster && <ChevronDown size={12} />}
       </button>
-      {open && !locked && (
-        <div
-          className="absolute right-0 z-30 mt-1 w-64 rounded-xl border shadow-lg overflow-hidden"
-          style={{ borderColor: '#E5E7EB', background: 'white', boxShadow: '0 10px 30px rgba(0,0,0,0.12)' }}>
+      {open && coords && !isMaster && createPortal(
+        <div ref={ddRef} className="z-50 w-64 rounded-xl border overflow-hidden" style={ddStyle}>
           <div
             className="px-3 py-2 border-b text-[10px] font-bold uppercase tracking-wider"
             style={{ color: '#9CA3AF', borderColor: '#F1F5F9', background: '#FAFBFC' }}>
@@ -784,9 +855,10 @@ function AdminAccessPicker({ access, locked, onChange }: {
             style={{ color: '#9CA3AF', borderColor: '#F1F5F9', background: '#FAFBFC' }}>
             User sees Admin Control if at least one box is checked.
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
-    </div>
+    </>
   );
 }
 
