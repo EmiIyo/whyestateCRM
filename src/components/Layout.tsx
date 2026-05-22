@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { signOut as authSignOut, setNickname, useAuthStore, DEFAULT_AVATAR_COLOR } from '@/lib/auth';
+import { signOutAndReset, setNickname, useAuthStore, DEFAULT_AVATAR_COLOR } from '@/lib/auth';
 import { ROLES, type Role, canDo, usePermsStore } from '@/lib/permissions';
 import type { Enums } from '@/types/database';
 
@@ -190,8 +190,9 @@ function UserCard({ collapsed }: { collapsed: boolean }) {
   useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
 
   const handleSignOut = async () => {
-    await authSignOut();
-    navigate(ROUTE_PATHS.HOME, { replace: true });
+    // Hard-reload through signOutAndReset — closes realtime subscriptions,
+    // clears zustand stores, and drops per-tab sessionStorage state.
+    await signOutAndReset();
   };
 
   const startEdit = () => { setDraft(userName); setEditing(true); };
@@ -441,8 +442,7 @@ function TopBar({
   }, [menuOpen]);
 
   const handleSignOut = async () => {
-    await authSignOut();
-    navigate(ROUTE_PATHS.HOME, { replace: true });
+    await signOutAndReset();
   };
 
   return (

@@ -135,6 +135,17 @@ export async function signOut(): Promise<void> {
   await supabase.auth.signOut();
 }
 
+// Full sign-out path used by the topbar + sidebar buttons. Hard-reloads the
+// page so realtime channels close, zustand stores reset, and the next user
+// in the same browser starts from a clean slate.
+export async function signOutAndReset(): Promise<void> {
+  try { await supabase.auth.signOut(); } catch { /* network down — still wipe */ }
+  try { sessionStorage.removeItem('we.view_as_role'); } catch { /* ignore */ }
+  // Use assign (not replace) so the browser's back button still reaches the
+  // landing page after the redirect.
+  window.location.assign('/');
+}
+
 export async function requestPasswordReset(email: string): Promise<void> {
   const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
     redirectTo: window.location.origin,

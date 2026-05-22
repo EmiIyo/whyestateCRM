@@ -5,7 +5,7 @@ import {
   Eye, EyeOff, KeyRound, AlertCircle, Camera, Trash2,
 } from 'lucide-react';
 import {
-  getCurrentUser, signOut as authSignOut, setNickname, getAvatarColor, setAvatarColor,
+  getCurrentUser, signOutAndReset, setNickname, getAvatarColor, setAvatarColor,
   listAllUsers, setPassword,
   getAvatarImage, setAvatarImage, clearAvatarImage, getUserTier,
 } from '@/lib/auth';
@@ -78,7 +78,7 @@ export default function MyProfile() {
           </div>
 
           <div className="p-6">
-            {tab === 'profile'  && <ProfileTab navigate={navigate} signOut={async () => { await authSignOut(); navigate('/'); }} email={me.email} name={me.name} />}
+            {tab === 'profile'  && <ProfileTab navigate={navigate} signOut={() => { void signOutAndReset(); }} email={me.email} name={me.name} />}
             {tab === 'security' && <SecurityTab email={me.email} />}
           </div>
         </div>
