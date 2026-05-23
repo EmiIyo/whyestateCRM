@@ -55,8 +55,8 @@ export default function Landing() {
             <span style={{ color: '#1EC9C4' }}>finally organised.</span>
           </h1>
           <p className="text-base sm:text-lg max-w-2xl mx-auto mb-8" style={{ color: '#64748B' }}>
-            Manage prospects, listings, and deals across every project board you run — without losing track of a single
-            unit, contact, or follow-up.
+            Manage prospects, clients, and follow-ups across every project board you run — without losing track of a single
+            unit, contact, or task.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
             <button onClick={() => open('signup')}

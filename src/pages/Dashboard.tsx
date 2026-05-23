@@ -1,9 +1,9 @@
 import { LayoutDashboard, Sparkles } from 'lucide-react';
 
-// Dashboard is intentionally a placeholder — the live KPI/commission/pipeline
-// data layer hasn't been built yet. Showing the old hard-coded mocks risked
-// confusing users into trusting fake numbers, so we ship a friendly empty
-// state instead until a real Deals/Commission/Reports pipeline is wired up.
+// Dashboard is intentionally a placeholder — the live KPI/pipeline data layer
+// hasn't been built yet. Showing hard-coded mocks risked confusing users into
+// trusting fake numbers, so we ship a friendly empty state until the real
+// analytics pipeline is wired up.
 
 export default function Dashboard(): React.ReactElement {
   return (
@@ -16,7 +16,7 @@ export default function Dashboard(): React.ReactElement {
           </div>
           <h1 className="text-xl font-bold" style={{ color: '#1A202C' }}>Dashboard coming soon</h1>
           <p className="text-sm mt-2 max-w-md mx-auto" style={{ color: '#6B7280' }}>
-            We're wiring real KPIs, commission trends, and pipeline analytics into this view.
+            We're wiring real KPIs and pipeline analytics into this view.
             For now use <strong>Prospect Hub</strong>, <strong>Clients</strong>, and <strong>Calendar</strong> to run your day-to-day.
           </p>
           <div className="flex items-center justify-center gap-1.5 mt-5 text-xs font-semibold" style={{ color: '#0F766E' }}>

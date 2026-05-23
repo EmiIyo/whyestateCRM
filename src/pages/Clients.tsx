@@ -2,11 +2,11 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   Plus, Search, X, Trash2, Check, MapPin,
   Calendar as CalendarIcon, ChevronDown, Users, AlertTriangle, Sparkles,
-  Pencil, ArrowRight, ClipboardList, Filter,
+  Pencil, ClipboardList, Filter,
 } from 'lucide-react';
 import {
   listClients, createClient, updateClient, deleteClient,
-  addTask, toggleTask, deleteTask, convertToListing,
+  addTask, toggleTask, deleteTask,
   isOverdue, isToday, isUpcoming, fmtDate,
   CLIENT_TYPES, CLIENT_STAGES, STAGE_TONES, TYPE_TONES, PRIORITY_TONES,
   type Client, type ClientStage, type ClientType, type ClientTask, type TaskPriority,
@@ -96,7 +96,7 @@ export default function ClientsPage() {
     dueToday: clients.filter((c) =>
       isToday(c.nextFollowUp) || c.tasks.some((t) => !t.done && isToday(t.dueDate))
     ).length,
-    readyToConvert: clients.filter((c) => c.stage === 'Closed Won' && !c.convertedListingId).length,
+    closedWon: clients.filter((c) => c.stage === 'Closed Won').length,
   }), [clients]);
 
   return (
@@ -121,10 +121,10 @@ export default function ClientsPage() {
 
         {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-          <StatCard icon={<Users size={16} />}              label="Total clients"      value={stats.total}          tone={{ bg: '#E0F2FE', text: '#0369A1' }} />
-          <StatCard icon={<Sparkles size={16} />}           label="Active pipeline"    value={stats.active}         tone={{ bg: '#EDE9FE', text: '#7C3AED' }} />
-          <StatCard icon={<AlertTriangle size={16} />}      label="Follow-ups today"   value={stats.dueToday}       tone={{ bg: '#FEF3C7', text: '#92400E' }} />
-          <StatCard icon={<ArrowRight size={16} />}         label="Ready to convert"   value={stats.readyToConvert} tone={{ bg: '#DCFCE7', text: '#15803D' }} />
+          <StatCard icon={<Users size={16} />}              label="Total clients"      value={stats.total}      tone={{ bg: '#E0F2FE', text: '#0369A1' }} />
+          <StatCard icon={<Sparkles size={16} />}           label="Active pipeline"    value={stats.active}     tone={{ bg: '#EDE9FE', text: '#7C3AED' }} />
+          <StatCard icon={<AlertTriangle size={16} />}      label="Follow-ups today"   value={stats.dueToday}   tone={{ bg: '#FEF3C7', text: '#92400E' }} />
+          <StatCard icon={<Check size={16} />}              label="Closed won"         value={stats.closedWon}  tone={{ bg: '#DCFCE7', text: '#15803D' }} />
         </div>
 
         {/* Toolbar */}
@@ -198,10 +198,6 @@ export default function ClientsPage() {
             clients={filtered}
             onOpenClient={(c) => setEditing(c)}
             onDelete={(c) => setConfirmDelete(c)}
-            onConvert={async (c) => {
-              try { await convertToListing(c.id); await refresh(); notifySuccess(`${c.name} converted to listing`); }
-              catch (e) { notifyError('Could not convert client', e); }
-            }}
           />
         )}
       </div>
@@ -245,11 +241,6 @@ export default function ClientsPage() {
             if (!editing) return;
             try { await deleteTask(taskId); await refresh(); notifySuccess('Task removed'); }
             catch (e) { notifyError('Could not delete task', e); }
-          }}
-          onConvert={async () => {
-            if (!editing) return;
-            try { await convertToListing(editing.id); notifySuccess('Converted to listing'); setEditing(null); await refresh(); }
-            catch (e) { notifyError('Could not convert client', e); }
           }}
           onDelete={() => {
             if (!editing) return;
@@ -507,11 +498,10 @@ function KanbanBoard({ clients, onOpenClient, onStageChange }: {
 }
 
 // ─── Sub: ListView ──────────────────────────────────────────────────────────
-function ListView({ clients, onOpenClient, onDelete, onConvert }: {
+function ListView({ clients, onOpenClient, onDelete }: {
   clients: Client[];
   onOpenClient: (c: Client) => void;
   onDelete: (c: Client) => void;
-  onConvert: (c: Client) => void;
 }) {
   if (clients.length === 0) {
     return (
@@ -567,19 +557,6 @@ function ListView({ clients, onOpenClient, onDelete, onConvert }: {
                 </td>
                 <td className="px-3 py-2.5">
                   <div className="flex items-center justify-end gap-1">
-                    {c.stage === 'Closed Won' && !c.convertedListingId && (
-                      <button onClick={() => onConvert(c)} title="Convert to Listing"
-                        className="text-[10px] font-bold px-2 py-1 rounded-md text-white hover:opacity-90"
-                        style={{ background: '#22C55E' }}>
-                        Convert →
-                      </button>
-                    )}
-                    {c.convertedListingId && (
-                      <span className="text-[10px] font-bold px-2 py-1 rounded-md"
-                        style={{ background: '#F3F4F6', color: '#6B7280' }}>
-                        ✓ Converted
-                      </span>
-                    )}
                     <button onClick={() => onOpenClient(c)} title="Edit"
                       className="p-1.5 rounded-md hover:bg-gray-100">
                       <Pencil size={12} className="text-gray-400" />
@@ -600,14 +577,13 @@ function ListView({ clients, onOpenClient, onDelete, onConvert }: {
 }
 
 // ─── Sub: ClientModal (create / edit + task drawer) ─────────────────────────
-function ClientModal({ client, onClose, onSave, onAddTask, onToggleTask, onDeleteTask, onConvert, onDelete }: {
+function ClientModal({ client, onClose, onSave, onAddTask, onToggleTask, onDeleteTask, onDelete }: {
   client: Client | null;
   onClose: () => void;
   onSave: (patch: Partial<Client>) => void;
   onAddTask: (title: string, due: string, prio: TaskPriority) => void;
   onToggleTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
-  onConvert: () => void;
   onDelete: () => void;
 }) {
   const editing = client !== null;
@@ -841,22 +817,7 @@ function ClientModal({ client, onClose, onSave, onAddTask, onToggleTask, onDelet
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-6 py-3 border-t" style={{ borderColor: '#F1F5F9', background: '#F8FAFB' }}>
-          <div className="flex items-center gap-2">
-            {editing && stage === 'Closed Won' && !client!.convertedListingId && (
-              <button onClick={onConvert}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white hover:opacity-90"
-                style={{ background: '#22C55E' }}>
-                Convert to Listing <ArrowRight size={12} strokeWidth={2.5} />
-              </button>
-            )}
-            {editing && client!.convertedListingId && (
-              <span className="text-[10px] font-bold px-2 py-1 rounded-md"
-                style={{ background: '#DCFCE7', color: '#15803D' }}>
-                ✓ Converted to Listing
-              </span>
-            )}
-          </div>
+        <div className="flex items-center justify-end gap-2 px-6 py-3 border-t" style={{ borderColor: '#F1F5F9', background: '#F8FAFB' }}>
           <div className="flex items-center gap-2">
             {editing && (
               <button onClick={onDelete}

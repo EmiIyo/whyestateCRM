@@ -36,7 +36,6 @@ export interface Client {
   nextFollowUp: string;
   notes: string;
   ownerId: string;
-  convertedListingId?: string | null;
   createdAt: string;
   tasks: ClientTask[];
 }
@@ -95,7 +94,6 @@ function clientFromDb(r: DbClient, tasks: DbClientTask[] = []): Client {
     nextFollowUp: r.next_follow_up ?? '',
     notes: r.notes,
     ownerId: r.owner_id,
-    convertedListingId: r.converted_listing_id,
     createdAt: r.created_at,
     tasks: tasks.map(taskFromDb),
   };
@@ -153,7 +151,6 @@ export async function createClient(input: Omit<Client, 'id' | 'createdAt' | 'tas
     last_contact: input.lastContact || null,
     next_follow_up: input.nextFollowUp || null,
     notes: input.notes,
-    converted_listing_id: input.convertedListingId ?? null,
   };
   const { data, error } = await supabase.from('clients').insert(insert).select('*').single();
   if (error) throw error;
@@ -176,7 +173,6 @@ export async function updateClient(id: string, patch: Partial<Omit<Client, 'id' 
   if (patch.lastContact       !== undefined) update.last_contact = patch.lastContact || null;
   if (patch.nextFollowUp      !== undefined) update.next_follow_up = patch.nextFollowUp || null;
   if (patch.notes             !== undefined) update.notes = patch.notes;
-  if (patch.convertedListingId!== undefined) update.converted_listing_id = patch.convertedListingId;
 
   const { error } = await supabase.from('clients').update(update).eq('id', id);
   if (error) throw error;
@@ -218,13 +214,6 @@ export async function importFromProspect(prospectId: string): Promise<Client> {
   // setof — coerce defensively.
   const row = (Array.isArray(data) ? data[0] : data) as DbClient;
   return clientFromDb(row, []);
-}
-
-// ─── Conversion → Listing (stub until the Listings module ships) ─────────
-export async function convertToListing(clientId: string): Promise<string> {
-  const listingId = `lst_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  await updateClient(clientId, { convertedListingId: listingId, stage: 'Closed Won' });
-  return listingId;
 }
 
 // ─── Selectors (date helpers) ────────────────────────────────────────────
