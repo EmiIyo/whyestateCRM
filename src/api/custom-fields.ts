@@ -76,4 +76,10 @@ export async function setCustomValue(prospectId: string, fieldId: string, value:
     .from('custom_values')
     .upsert({ prospect_id: prospectId, field_id: fieldId, value }, { onConflict: 'prospect_id,field_id' });
   if (error) throw error;
+  // Mirror system-field edits: stamp last_edited_at on the parent row so the
+  // "Last Update" column reflects custom-cell edits too.
+  await supabase
+    .from('prospects')
+    .update({ last_edited_at: new Date().toISOString() })
+    .eq('id', prospectId);
 }

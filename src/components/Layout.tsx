@@ -17,6 +17,7 @@ import {
   Settings,
   Calendar,
   Folder,
+  Building2,
   Users,
   Pencil,
   Check as CheckIcon,
@@ -43,6 +44,7 @@ const navItems: NavDef[] = [
   { label: 'Clients',       icon: Users,           path: ROUTE_PATHS.CLIENTS,   badge: null, permission: 'nav.clients' },
   { label: 'Calendar',      icon: Calendar,        path: ROUTE_PATHS.CALENDAR,  badge: null, permission: 'nav.calendar' },
   { label: 'Documents',     icon: Folder,          path: ROUTE_PATHS.DOCUMENTS, badge: null, permission: 'nav.documents' },
+  { label: 'Listing',       icon: Building2,       path: ROUTE_PATHS.LISTING,   badge: null, permission: 'nav.listing' },
 ];
 
 const secondaryNavItems: NavDef[] = [

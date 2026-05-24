@@ -6,6 +6,7 @@ import {
   AlertCircle, CheckCircle2, Loader2, Users, UserPlus,
   GripVertical, Settings2, Mail, Folder as FolderIcon, FolderPlus, Layers,
   FileText, FileSpreadsheet, Eye, Target,
+  Lock, Unlock, MessageSquare, Pencil,
 } from 'lucide-react';
 import * as SliderPrimitive from '@radix-ui/react-slider';
 import { getCurrentUser, listAllUsers, getAvatarColor, getAvatarImage, getUserTier, useAuthStore } from '@/lib/auth';
@@ -111,6 +112,331 @@ const DEMO_PHONE_PREFIXES = ['012', '013', '014', '016', '017', '018', '019', '0
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
 function chance(p: number): boolean { return Math.random() < p; }
 
+// ─── WhatsApp helpers ───────────────────────────────────────────────────────
+// Phone cells can hold multiple numbers separated by '/', and inputs vary
+// wildly (with/without country code, hyphens, spaces). Convert to the bare
+// international format wa.me expects: digits-only, leading '0' replaced with
+// Malaysia's '60'. Defaults to MY country code when one isn't supplied.
+function normalisePhonesForWhatsApp(raw: string): string[] {
+  if (!raw) return [];
+  return raw
+    .split(/[/,;]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const digits = s.replace(/\D/g, '');
+      if (!digits) return '';
+      if (digits.startsWith('60')) return digits;
+      if (digits.startsWith('0'))  return '60' + digits.slice(1);
+      // No leading country code or 0 — assume MY mobile (e.g. "127879945").
+      return '60' + digits;
+    })
+    .filter(Boolean);
+}
+
+// Small green WhatsApp glyph (lucide doesn't include the brand mark).
+function WhatsAppIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
+      <path d="M17.5 14.4c-.3-.1-1.7-.8-2-.9-.3-.1-.5-.2-.7.2s-.8.9-1 1.1c-.2.2-.4.2-.7.1-.3-.2-1.2-.5-2.3-1.4-.9-.8-1.5-1.8-1.6-2.1-.2-.3 0-.5.1-.6.1-.1.3-.4.4-.6.1-.2.2-.3.3-.5 0-.2 0-.4 0-.5 0-.1-.7-1.7-1-2.3-.3-.6-.5-.5-.7-.5h-.6c-.2 0-.5.1-.8.4s-1.1 1.1-1.1 2.6c0 1.6 1.1 3 1.3 3.3.2.3 2.2 3.4 5.4 4.7.7.3 1.3.5 1.8.6.8.2 1.5.2 2 .1.6-.1 1.7-.7 2-1.4.2-.7.2-1.2.2-1.4-.1-.2-.3-.3-.6-.5zM12 2C6.5 2 2 6.5 2 12c0 1.7.5 3.4 1.3 4.8L2 22l5.4-1.3c1.4.7 2.9 1.1 4.6 1.1 5.5 0 10-4.5 10-10S17.5 2 12 2zm0 18.2c-1.5 0-2.9-.4-4.2-1.2l-.3-.2-3.1.8.8-3-.2-.3c-.8-1.3-1.2-2.8-1.2-4.3 0-4.6 3.7-8.3 8.3-8.3s8.3 3.7 8.3 8.3-3.7 8.3-8.3 8.3z"/>
+    </svg>
+  );
+}
+
+// ─── WhatsApp templates ────────────────────────────────────────────────────
+// Templates are stored per-user in localStorage so each agent can build their
+// own library. Body can use {key} tokens (any Prospect field, plus a few
+// derived helpers like {agent} / {first_name}) — see `WA_TOKENS` below for
+// the full menu shown in the settings modal.
+type WaLang = 'en' | 'zh';
+interface WaTemplate { id: string; label: string; body: string; lang: WaLang }
+
+const WA_TEMPLATES_KEY  = 'we.wa_templates';
+const WA_LANG_KEY       = 'we.wa_lang';
+
+const DEFAULT_WA_TEMPLATES: WaTemplate[] = [
+  {
+    id: 'initial', lang: 'en',
+    label: 'Initial outreach',
+    body:
+      `Hi {first_name}, thank you for speaking with me earlier.\n\n` +
+      `I'm {agent}, I would be happy to assist you in marketing your property professionally, maximizing listing exposure, and matching it with qualified tenants/buyers. We can also provide professional photoshooting and 3D walkthrough FOC to help present your property better.\n\n` +
+      `May I have the property details, asking price/rental, current condition, availability date, and your preferred viewing arrangement?`,
+  },
+  {
+    id: 'followup', lang: 'en',
+    label: 'Follow up',
+    body:
+      `Hi {first_name}, just following up on our previous chat about your property at {unitNo}.\n\n` +
+      `Are you still open to listing it? Happy to share market comparables and discuss next steps whenever it suits you.`,
+  },
+];
+
+function loadWaTemplates(): WaTemplate[] {
+  if (typeof window === 'undefined') return DEFAULT_WA_TEMPLATES;
+  try {
+    const raw = localStorage.getItem(WA_TEMPLATES_KEY);
+    if (!raw) return DEFAULT_WA_TEMPLATES;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_WA_TEMPLATES;
+    // Backfill `lang` on pre-language templates so the filter still works.
+    return (parsed as Partial<WaTemplate>[]).map((t) => ({
+      id:    String(t.id ?? `tpl_${Math.random().toString(36).slice(2, 8)}`),
+      label: String(t.label ?? ''),
+      body:  String(t.body ?? ''),
+      lang:  (t.lang === 'zh' ? 'zh' : 'en') as WaLang,
+    }));
+  } catch { return DEFAULT_WA_TEMPLATES; }
+}
+function saveWaTemplates(templates: WaTemplate[]): void {
+  try { localStorage.setItem(WA_TEMPLATES_KEY, JSON.stringify(templates)); } catch { /* ignore */ }
+}
+
+function loadWaLang(): WaLang {
+  if (typeof window === 'undefined') return 'en';
+  try { return (localStorage.getItem(WA_LANG_KEY) === 'zh' ? 'zh' : 'en') as WaLang; }
+  catch { return 'en'; }
+}
+function saveWaLang(lang: WaLang): void {
+  try { localStorage.setItem(WA_LANG_KEY, lang); } catch { /* ignore */ }
+}
+
+// Token catalog shown in the template editor. Each entry: { token, label,
+// resolver }. Resolver receives the row + agent and returns the substituted
+// string. Order = order in the editor's "Insert column" picker.
+interface WaTokenDef { token: string; label: string; resolve: (ctx: WaTokenCtx) => string }
+interface WaTokenCtx { row: Prospect; agentName: string; boardName?: string }
+
+const WA_TOKENS: WaTokenDef[] = [
+  { token: '{name}',          label: 'Full name',         resolve: (c) => c.row.name },
+  { token: '{first_name}',    label: 'First name',        resolve: (c) => firstName(c.row.name, 'there') },
+  { token: '{phone}',         label: 'Phone',             resolve: (c) => c.row.phone },
+  { token: '{boardName}',     label: 'Board name',        resolve: (c) => c.boardName ?? '' },
+  { token: '{unitNo}',        label: 'Unit No',           resolve: (c) => c.row.unitNo },
+  { token: '{type}',          label: 'Type',              resolve: (c) => c.row.type },
+  { token: '{size}',          label: 'Size (sqft)',       resolve: (c) => c.row.size },
+  { token: '{askingRent}',    label: 'Asking Rent',       resolve: (c) => c.row.askingRent },
+  { token: '{askingPrice}',   label: 'Asking Price',      resolve: (c) => c.row.askingPrice },
+  { token: '{callingStatus}', label: 'Calling Status',    resolve: (c) => c.row.callingStatus },
+  { token: '{listingType}',   label: 'Listing Type',      resolve: (c) => c.row.listingType },
+  { token: '{furnishing}',    label: 'Condition',         resolve: (c) => c.row.furnishing },
+  { token: '{availability}',  label: 'Availability',      resolve: (c) => c.row.availability },
+  { token: '{unitStatus}',    label: 'Unit Status',       resolve: (c) => c.row.unitStatus },
+  { token: '{remark}',        label: 'Remark',            resolve: (c) => c.row.remark },
+  { token: '{agent}',         label: "Agent's first name", resolve: (c) => firstName(c.agentName, 'me') },
+  { token: '{agent_full}',    label: "Agent's full name", resolve: (c) => c.agentName || '' },
+];
+
+function fillTemplate(body: string, ctx: WaTokenCtx): string {
+  let out = body;
+  for (const t of WA_TOKENS) {
+    if (!out.includes(t.token)) continue;
+    // Escape regex special characters in the token before building the regex.
+    const safe = t.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(safe, 'g'), t.resolve(ctx) ?? '');
+  }
+  return out;
+}
+function firstName(full: string | undefined, fallback: string): string {
+  const n = (full ?? '').trim().split(/[\s/]+/)[0];
+  return n || fallback;
+}
+
+// ─── WhatsApp button ───────────────────────────────────────────────────────
+// Click-triggered popup that lets the agent pick a template (or write a
+// custom message) and — when the row has multiple numbers — choose which
+// contact to message. The popup is portaled to <body> with `position: fixed`
+// so it can never be clipped by the scrollable table or hidden behind the
+// next row's sticky cells.
+function WhatsAppButton({ row, agentName, boardName, templates, lang, onLangChange, onOpenChange, onManageTemplates }: {
+  row: Prospect;
+  agentName: string;
+  boardName?: string;
+  templates: WaTemplate[];
+  lang: WaLang;
+  onLangChange: (next: WaLang) => void;
+  onOpenChange?: (open: boolean) => void;
+  onManageTemplates?: () => void;
+}) {
+  const phone = row.phone;
+  const numbers = normalisePhonesForWhatsApp(phone);
+  // Pair each normalised number with the original token so the picker can
+  // show the user-readable formatting they typed in (e.g. "012-2878545").
+  const original = phone.split(/[/,;]/).map((s) => s.trim()).filter(Boolean);
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const [pickedNum, setPickedNum] = useState(0);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+
+  // Bubble open/close to the parent so the host cell can keep the button
+  // visible while the popup is up (otherwise the hover-gated wrapper hides
+  // the click target the moment the cursor moves to the popup).
+  useEffect(() => { onOpenChange?.(!!anchor); }, [anchor, onOpenChange]);
+
+  // Close on outside click — covers both the button's host cell AND the
+  // portaled popup, since either can be the click origin.
+  useEffect(() => {
+    if (!anchor) return;
+    const h = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t)) return;
+      if (popupRef.current?.contains(t)) return;
+      setAnchor(null);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [anchor]);
+
+  if (numbers.length === 0) return null;
+
+  // Pair names with phone numbers by position so "Linux Lin / Thomas Foo"
+  // alongside "012-1111 / 016-2222" sends the second template to Thomas
+  // when the user picks the second number. Falls back to the first name
+  // when the lists don't align.
+  const names = row.name.split(/[/]/).map((s) => s.trim()).filter(Boolean);
+  const idx = Math.min(pickedNum, numbers.length - 1);
+  const pickedName  = names[idx] ?? names[0] ?? row.name;
+  const pickedPhone = original[idx] ?? row.phone;
+  // Substitute the row's name + phone with the picked-contact's slice so
+  // {name}, {first_name}, and {phone} all reflect who's actually being messaged.
+  const ctxRow: Prospect = { ...row, name: pickedName, phone: pickedPhone };
+  const ctx: WaTokenCtx = { row: ctxRow, agentName, boardName };
+  const targetNumber = numbers[idx];
+  const buildHref = (msg: string) => `https://wa.me/${targetNumber}?text=${encodeURIComponent(msg)}`;
+  const openPopup = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setAnchor(anchor ? null : rect);   // toggle
+  };
+
+  // Position the portaled popup directly under the button, flipping it up
+  // when there isn't enough space below, and clamping into the viewport.
+  let pos: { top: number; left: number } | null = null;
+  if (anchor) {
+    const POPUP_W = 280;
+    const POPUP_H = 240;
+    const spaceBelow = window.innerHeight - anchor.bottom;
+    const top = spaceBelow < POPUP_H + 8
+      ? Math.max(8, anchor.top - POPUP_H - 4)
+      : anchor.bottom + 4;
+    const left = Math.min(window.innerWidth - POPUP_W - 8, Math.max(8, anchor.right - POPUP_W));
+    pos = { top, left };
+  }
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={openPopup}
+        title="WhatsApp"
+        className="flex items-center justify-center w-5 h-5 rounded text-white hover:opacity-90 flex-shrink-0"
+        style={{ background: '#25D366' }}>
+        <WhatsAppIcon size={11} />
+      </button>
+
+      {anchor && pos && createPortal(
+        <div ref={popupRef}
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          style={{
+            position: 'fixed', top: pos.top, left: pos.left, width: 280,
+            zIndex: 9999, background: 'white', borderRadius: 8,
+            border: '1px solid #F3F4F6', boxShadow: '0 12px 28px rgba(0,0,0,0.18)',
+          }}>
+
+          {/* Number picker — only shown when there's more than one contact. */}
+          {numbers.length > 1 && (
+            <div className="px-3 py-2 border-b border-gray-100">
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: '#9CA3AF' }}>
+                Send to
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {numbers.map((n, i) => {
+                  const active = i === pickedNum;
+                  return (
+                    <button key={i} onClick={() => setPickedNum(i)}
+                      className="text-[11px] font-mono px-2 py-0.5 rounded-md border transition-colors"
+                      style={{
+                        borderColor: active ? '#25D366' : '#E5E7EB',
+                        background:  active ? '#DCFCE7' : 'white',
+                        color:       active ? '#15803D' : '#374151',
+                      }}>
+                      {original[i] ?? n}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Language toggle — filters the template list to only show
+              templates tagged with the picked language. Preference is
+              persisted (per-user, localStorage). */}
+          <div className="flex items-center justify-between px-3 pt-2 pb-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#9CA3AF' }}>
+              Pick a message
+            </span>
+            <div className="inline-flex items-stretch rounded-md overflow-hidden border" style={{ borderColor: '#E5E7EB' }}>
+              {(['en', 'zh'] as WaLang[]).map((L) => {
+                const active = lang === L;
+                return (
+                  <button key={L}
+                    onClick={() => onLangChange(L)}
+                    className="px-1.5 py-0.5 text-[10px] font-bold transition-colors"
+                    style={{
+                      background: active ? '#1EC9C4' : 'white',
+                      color:      active ? 'white'   : '#6B7280',
+                    }}>
+                    {L === 'en' ? 'EN' : '中'}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {(() => {
+            const visible = templates.filter((t) => t.lang === lang);
+            if (visible.length === 0) {
+              return (
+                <p className="px-3 py-3 text-xs text-gray-400">
+                  No {lang === 'zh' ? '中文' : 'English'} templates yet — use Manage below to add one.
+                </p>
+              );
+            }
+            return visible.map((t) => (
+              <a key={t.id}
+                href={buildHref(fillTemplate(t.body, ctx))}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setAnchor(null)}
+                className="block px-3 py-2 hover:bg-gray-50 transition-colors">
+                <div className="flex items-center gap-2">
+                  <span className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                    style={{ background: '#25D366', color: 'white' }}>
+                    <WhatsAppIcon size={9} />
+                  </span>
+                  <span className="text-xs font-semibold" style={{ color: '#1A202C' }}>{t.label}</span>
+                </div>
+                <p className="text-[10px] mt-1 ml-6 line-clamp-2" style={{ color: '#6B7280' }}>
+                  {fillTemplate(t.body, ctx).split('\n')[0]}
+                </p>
+              </a>
+            ));
+          })()}
+          {onManageTemplates && (
+            <button onClick={() => { setAnchor(null); onManageTemplates(); }}
+              className="w-full text-left px-3 py-2 border-t border-gray-100 text-xs font-semibold hover:bg-gray-50 transition-colors flex items-center gap-1.5"
+              style={{ color: '#6B7280' }}>
+              <Settings2 size={11} /> Manage templates…
+            </button>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function genPhone(): string {
   const prefix = pick(DEMO_PHONE_PREFIXES);
   const num = String(Math.floor(Math.random() * 9_000_000) + 1_000_000);
@@ -143,9 +469,11 @@ function genProspect(seq: number): Prospect {
     agent: '',
     lastUpdate: '',
     callingStatus,
+    valid: '',
     listingType: listingPick,
     furnishing,
     availability,
+    unitStatus: '',
     askingRent:  filledIn && chance(0.7) ? String(1500 + Math.floor(Math.random() * 5000)) : '',
     askingPrice: filledIn && chance(0.5) ? String(450_000 + Math.floor(Math.random() * 1_500_000)) : '',
     remark: '',
@@ -487,6 +815,236 @@ function FolderPromptModal({
             style={{ background: '#1EC9C4' }}
           >
             {ctaLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WhatsApp Message Templates settings ────────────────────────────────────
+// Per-user template library backed by localStorage. Lets the agent edit the
+// shipped templates (Initial outreach / Follow up), add new ones, and insert
+// column tokens like {first_name} or {askingRent} so the message auto-fills
+// with the row's data when sent.
+function WaTemplatesModal({ initial, onSave, onClose }: {
+  initial: WaTemplate[];
+  onSave: (next: WaTemplate[]) => void;
+  onClose: () => void;
+}) {
+  // Working copy so Cancel can discard. Save commits.
+  const [drafts, setDrafts] = useState<WaTemplate[]>(() => initial.map((t) => ({ ...t })));
+  const [activeId, setActiveId] = useState<string | null>(initial[0]?.id ?? null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+
+  const active = drafts.find((d) => d.id === activeId) ?? null;
+
+  const updateActive = (patch: Partial<WaTemplate>) => {
+    if (!active) return;
+    setDrafts((prev) => prev.map((d) => (d.id === active.id ? { ...d, ...patch } : d)));
+  };
+
+  const addTemplate = () => {
+    const id = `tpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    // New templates inherit the active template's language so the user can
+    // build out a CN/EN library without re-tagging each entry.
+    const inheritedLang: WaLang = active?.lang ?? 'en';
+    const next: WaTemplate = { id, label: 'New template', body: 'Hi {first_name}, ', lang: inheritedLang };
+    setDrafts((prev) => [...prev, next]);
+    setActiveId(id);
+  };
+  const removeTemplate = (id: string) => {
+    setDrafts((prev) => {
+      const next = prev.filter((d) => d.id !== id);
+      if (id === activeId) setActiveId(next[0]?.id ?? null);
+      return next;
+    });
+  };
+  const moveTemplate = (id: string, dir: -1 | 1) => {
+    setDrafts((prev) => {
+      const i = prev.findIndex((d) => d.id === id);
+      if (i < 0) return prev;
+      const j = i + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  };
+
+  // Insert a token at the textarea's cursor; falls back to appending.
+  const insertToken = (token: string) => {
+    if (!active) return;
+    const ta = bodyRef.current;
+    if (!ta) { updateActive({ body: (active.body ?? '') + token }); return; }
+    const start = ta.selectionStart ?? active.body.length;
+    const end   = ta.selectionEnd ?? active.body.length;
+    const before = active.body.slice(0, start);
+    const after  = active.body.slice(end);
+    const nextBody = before + token + after;
+    updateActive({ body: nextBody });
+    // Re-focus and place cursor right after the inserted token.
+    requestAnimationFrame(() => {
+      ta.focus();
+      const pos = start + token.length;
+      ta.setSelectionRange(pos, pos);
+    });
+  };
+
+  // Live-preview the message rendered for a synthetic example row, so the
+  // user can sanity-check token substitution before saving.
+  const sampleRow: Prospect = {
+    id: 'sample', name: 'Thai Kam Meng', unitNo: 'C-08-05', type: 'B3', size: '1403',
+    phone: '012-2878545', agent: '', lastUpdate: '',
+    callingStatus: 'Positive', valid: 'O', listingType: 'Rent', furnishing: 'Fully Furnished',
+    availability: 'Available', unitStatus: 'Own Stay',
+    askingRent: '3500', askingPrice: '', remark: '',
+  };
+  const preview = active ? fillTemplate(active.body, { row: sampleRow, agentName: 'Agent', boardName: 'Millerz Square' }) : '';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.45)' }}>
+      <div className="bg-white rounded-2xl shadow-2xl w-[860px] max-w-[calc(100vw-32px)] max-h-[calc(100vh-32px)] overflow-hidden flex flex-col"
+        style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: '#F1F5F9' }}>
+          <div>
+            <h3 className="text-sm font-bold flex items-center gap-2" style={{ color: '#1A202C' }}>
+              <MessageSquare size={14} /> WhatsApp Message Settings
+            </h3>
+            <p className="text-[11px] mt-0.5" style={{ color: '#9CA3AF' }}>
+              Edit your templates. Use column tokens like <span className="font-mono">{'{first_name}'}</span> to auto-fill row data.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100">
+            <X size={15} className="text-gray-400" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="grid grid-cols-[200px_1fr_180px] flex-1 overflow-hidden">
+          {/* ── Left rail: template list ── */}
+          <div className="border-r overflow-y-auto" style={{ borderColor: '#F1F5F9', background: '#FBFCFD' }}>
+            <button onClick={addTemplate}
+              className="w-full text-left px-3 py-2 text-xs font-semibold border-b hover:bg-gray-50 flex items-center gap-1.5"
+              style={{ color: '#0F766E', borderColor: '#F1F5F9' }}>
+              <Plus size={12} /> New template
+            </button>
+            {drafts.length === 0 && (
+              <p className="px-3 py-3 text-xs text-gray-400">No templates yet.</p>
+            )}
+            {drafts.map((t, i) => {
+              const isActive = t.id === activeId;
+              return (
+                <div key={t.id}
+                  onClick={() => setActiveId(t.id)}
+                  className="group px-2 py-2 border-b cursor-pointer flex items-center gap-1.5"
+                  style={{ borderColor: '#F1F5F9', background: isActive ? '#DAF3F2' : 'transparent' }}>
+                  <span className="flex-1 text-xs truncate font-medium"
+                    style={{ color: isActive ? '#0F766E' : '#1A202C' }}>{t.label || '(untitled)'}</span>
+                  <button onClick={(e) => { e.stopPropagation(); moveTemplate(t.id, -1); }}
+                    disabled={i === 0}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-0"
+                    title="Move up">↑</button>
+                  <button onClick={(e) => { e.stopPropagation(); moveTemplate(t.id, 1); }}
+                    disabled={i === drafts.length - 1}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-0"
+                    title="Move down">↓</button>
+                  <button onClick={(e) => { e.stopPropagation(); removeTemplate(t.id); }}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-red-500"
+                    title="Remove">
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ── Centre: editor ── */}
+          <div className="overflow-y-auto p-4 space-y-3">
+            {!active && (
+              <div className="text-center py-10 text-xs text-gray-400">Select a template, or click "New template" to add one.</div>
+            )}
+            {active && (
+              <>
+                <div className="flex items-end gap-3">
+                  <div className="flex-1">
+                    <label className="text-[10px] font-bold uppercase tracking-wider mb-1 block" style={{ color: '#6B7280' }}>Label</label>
+                    <input value={active.label}
+                      onChange={(e) => updateActive({ label: e.target.value })}
+                      placeholder="e.g. Initial outreach"
+                      className="w-full px-3 py-2 rounded-lg border text-sm outline-none focus:border-[#1EC9C4]"
+                      style={{ borderColor: '#E5E7EB' }} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-wider mb-1 block" style={{ color: '#6B7280' }}>Language</label>
+                    {/* Each template is saved under one language so the picker
+                        popup can surface EN-only or 中文-only at a time. */}
+                    <div className="inline-flex items-stretch rounded-lg border overflow-hidden" style={{ borderColor: '#E5E7EB' }}>
+                      {(['en', 'zh'] as WaLang[]).map((L) => {
+                        const isOn = active.lang === L;
+                        return (
+                          <button key={L} type="button"
+                            onClick={() => updateActive({ lang: L })}
+                            className="px-3 py-2 text-xs font-bold transition-colors"
+                            style={{
+                              background: isOn ? '#1EC9C4' : 'white',
+                              color:      isOn ? 'white'   : '#6B7280',
+                            }}>
+                            {L === 'en' ? 'EN' : '中'}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider mb-1 block" style={{ color: '#6B7280' }}>Message body</label>
+                  <textarea ref={bodyRef}
+                    value={active.body}
+                    onChange={(e) => updateActive({ body: e.target.value })}
+                    rows={10}
+                    placeholder="Hi {first_name}, ..."
+                    className="w-full px-3 py-2 rounded-lg border text-xs outline-none focus:border-[#1EC9C4] resize-y"
+                    style={{ borderColor: '#E5E7EB', fontFamily: 'inherit', minHeight: 180 }} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider mb-1 block" style={{ color: '#6B7280' }}>Preview (using a sample row)</label>
+                  <div className="rounded-lg border px-3 py-2 text-xs whitespace-pre-wrap" style={{ borderColor: '#E5E7EB', background: '#F8FAFB', color: '#374151', minHeight: 80 }}>
+                    {preview || <span className="text-gray-300">—</span>}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* ── Right rail: token picker ── */}
+          <div className="border-l overflow-y-auto p-3" style={{ borderColor: '#F1F5F9', background: '#FBFCFD' }}>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: '#6B7280' }}>Insert column</p>
+            <div className="space-y-1">
+              {WA_TOKENS.map((t) => (
+                <button key={t.token}
+                  onClick={() => insertToken(t.token)}
+                  disabled={!active}
+                  className="w-full text-left px-2 py-1 rounded hover:bg-white border border-transparent hover:border-[#1EC9C4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                  <div className="text-[10px] font-mono" style={{ color: '#0F766E' }}>{t.token}</div>
+                  <div className="text-[10px]" style={{ color: '#9CA3AF' }}>{t.label}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t" style={{ borderColor: '#F1F5F9', background: '#F8FAFB' }}>
+          <button onClick={onClose}
+            className="px-4 py-1.5 rounded-xl text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button onClick={() => { onSave(drafts); onClose(); }}
+            className="px-5 py-1.5 rounded-xl text-xs font-bold text-white hover:opacity-90"
+            style={{ background: '#1EC9C4' }}>
+            Save templates
           </button>
         </div>
       </div>
@@ -1197,7 +1755,10 @@ import {
   type ListingType,
   type Furnishing,
   type Availability,
+  type ValidStatus,
 } from '@/data/prospects';
+import * as dropdownPresetsApi from '@/api/dropdown_presets';
+import type { DropdownField, DropdownColor, DropdownPreset } from '@/api/dropdown_presets';
 
 // ─── Per-Board Manage Modal ───────────────────────────────────────────────────
 // Invite roles mirror the global RBAC roles defined in @/lib/permissions, minus
@@ -1797,6 +2358,55 @@ function ManageFolderModal({
 
 // ─── Space-pan hook ──────────────────────────────────────────────────────────
 // Hold spacebar and drag to pan the scroll container (like Figma / Notion)
+// Drag-to-pan when the user has toggled View → Unlocked. Unlike useSpacePan
+// (which requires holding space) this binds directly to the scroll container
+// so any click-and-drag inside the grid scrolls it. Returns whether a drag is
+// currently in progress (so the cell-click hover/select logic can suppress).
+function useDragPan(
+  scrollRef: MutableRefObject<HTMLDivElement | null>,
+  enabled: boolean,
+): boolean {
+  const dragging = useRef(false);
+  const lastPos  = useRef({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const onDown = (e: MouseEvent) => {
+      // Don't hijack drags that originate inside an interactive element
+      // (buttons, links, inputs) — only the empty cell area pans.
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'A' || tag === 'SELECT') return;
+      dragging.current = true;
+      setIsDragging(true);
+      lastPos.current  = { x: e.clientX, y: e.clientY };
+    };
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const dx = e.clientX - lastPos.current.x;
+      const dy = e.clientY - lastPos.current.y;
+      el.scrollLeft -= dx;
+      el.scrollTop  -= dy;
+      lastPos.current = { x: e.clientX, y: e.clientY };
+    };
+    const onUp = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      setIsDragging(false);
+    };
+    el.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup',   onUp);
+    return () => {
+      el.removeEventListener('mousedown', onDown);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',   onUp);
+    };
+  }, [enabled, scrollRef]);
+  return isDragging;
+}
+
 function useSpacePan(scrollRef: MutableRefObject<HTMLDivElement | null>) {
   const spaceDown  = useRef(false);
   const dragging   = useRef(false);
@@ -1870,10 +2480,16 @@ const FURNISHING_STYLE: Record<string, { bg: string; text: string }> = {
   'Fully Furnished':  { bg: '#DBEAFE', text: '#1D4ED8' },
   'Partly Furnished': { bg: '#DCFCE7', text: '#15803D' },
   'Bare Unit':        { bg: '#F3F4F6', text: '#374151' },
+  'Room Rent':        { bg: '#FFEDD5', text: '#EA580C' },
+  'Short Term Rent':  { bg: '#EDE9FE', text: '#7C3AED' },
 };
 const AVAILABILITY_STYLE: Record<string, { bg: string; text: string }> = {
   'Available':     { bg: '#DCFCE7', text: '#16A34A' },
   'NOT Available': { bg: '#FEE2E2', text: '#DC2626' },
+};
+const VALID_STYLE: Record<string, { bg: string; text: string }> = {
+  O: { bg: '#DCFCE7', text: '#16A34A' },
+  X: { bg: '#FEE2E2', text: '#DC2626' },
 };
 
 // Agent badge palette — pastel bg + saturated text (matches Calling Status look).
@@ -1896,8 +2512,17 @@ const AGENT_FALLBACK = AGENT_COLOR_PALETTE.gray;
 const CALLING_OPTIONS: CallingStatus[] = ['Positive', 'Negative', 'Neutral', ''];
 // Listing type is multi-select; LISTING_OPTIONS is the list of choosable atoms.
 const LISTING_OPTIONS: string[] = ['Rent', 'Sale'];
-const FURNISHING_OPTIONS: Furnishing[] = ['Fully Furnished', 'Partly Furnished', 'Bare Unit', ''];
+// Condition (DB column `furnishing`) now also covers the two rental types.
+const FURNISHING_OPTIONS: Furnishing[] = [
+  'Fully Furnished',
+  'Partly Furnished',
+  'Bare Unit',
+  'Room Rent',
+  'Short Term Rent',
+  '',
+];
 const AVAILABILITY_OPTIONS: Availability[] = ['Available', 'NOT Available', ''];
+const VALID_OPTIONS: ValidStatus[] = ['O', 'X', ''];
 
 // ─── Quick view tabs ──────────────────────────────────────────────────────────
 type QuickView = 'All' | 'Rent' | 'Sale';
@@ -1916,12 +2541,16 @@ const SYSTEM_FIELDS: { key: keyof Prospect | '__skip__'; label: string }[] = [
   { key: 'type',          label: 'Type' },
   { key: 'size',          label: 'Size (sqft)' },
   { key: 'phone',         label: 'Phone' },
+  { key: 'agent',         label: 'Agent' },
   { key: 'callingStatus', label: 'Calling Status' },
+  { key: 'valid',         label: 'Valid' },
   { key: 'listingType',   label: 'Listing Type' },
-  { key: 'furnishing',    label: 'Furnishing' },
+  { key: 'furnishing',    label: 'Condition' },          // DB column: furnishing
   { key: 'availability',  label: 'Availability' },
+  { key: 'unitStatus',    label: 'Unit Status' },
   { key: 'askingRent',    label: 'Asking RENT' },
   { key: 'askingPrice',   label: 'Asking PRICE' },
+  { key: 'lastUpdate',    label: 'Last Update' },
   { key: 'remark',        label: 'Remark' },
 ];
 
@@ -1933,11 +2562,16 @@ const AUTO_SUGGEST: Record<string, keyof Prospect> = {
   'size': 'size', 'size (sqft)': 'size', 'sqft': 'size', 'area': 'size', 'built up': 'size',
   'phone': 'phone', 'mobile': 'phone', 'contact': 'phone', 'phone number': 'phone', 'tel': 'phone',
   'calling status': 'callingStatus', 'callingstatus': 'callingStatus', 'status': 'callingStatus', 'call status': 'callingStatus',
+  'valid': 'valid', 'valid?': 'valid', 'validity': 'valid', 'verified': 'valid',
   'listing type': 'listingType', 'listingtype': 'listingType', 'listing': 'listingType',
-  'furnishing': 'furnishing', 'furnished': 'furnishing', 'furnish': 'furnishing',
+  // "Furnishing" still maps to the renamed Condition column (same DB field).
+  'condition': 'furnishing', 'furnishing': 'furnishing', 'furnished': 'furnishing', 'furnish': 'furnishing',
   'availability': 'availability', 'available': 'availability',
+  'unit status': 'unitStatus', 'unitstatus': 'unitStatus', 'occupancy': 'unitStatus', 'tenancy status': 'unitStatus',
   'asking rent': 'askingRent', 'askingrent': 'askingRent', 'rent': 'askingRent', 'monthly rent': 'askingRent',
   'asking price': 'askingPrice', 'askingprice': 'askingPrice', 'price': 'askingPrice', 'sale price': 'askingPrice',
+  'agent': 'agent', 'assigned': 'agent', 'assigned to': 'agent', 'agent name': 'agent', 'handled by': 'agent', 'owner agent': 'agent',
+  'last update': 'lastUpdate', 'lastupdate': 'lastUpdate', 'updated': 'lastUpdate', 'updated at': 'lastUpdate', 'last contact': 'lastUpdate', 'last contacted': 'lastUpdate', 'date': 'lastUpdate',
   'remark': 'remark', 'remarks': 'remark', 'note': 'remark', 'notes': 'remark', 'comment': 'remark',
 };
 
@@ -1966,6 +2600,53 @@ function parseRawCsv(text: string): { headers: string[]; rawRows: string[][] } {
 }
 
 // Apply column mapping to produce Prospect[]
+// Normalise free-form CSV cell values to the canonical enums the DB CHECK
+// constraints accept. Unknown / ambiguous → empty string (the row still
+// imports, the field just stays blank instead of blocking the whole batch).
+function normaliseCallingStatus(v: string): CallingStatus {
+  const k = v.trim().toLowerCase();
+  if (!k) return '';
+  if (k === 'positive' || k === 'good' || k === 'interested' || k === 'yes') return 'Positive';
+  if (k === 'negative' || k === 'bad'  || k === 'not interested' || k === 'no') return 'Negative';
+  if (k === 'neutral'  || k === 'maybe' || k === 'follow up' || k === 'follow-up') return 'Neutral';
+  return '';
+}
+function normaliseFurnishing(v: string): Furnishing {
+  const k = v.trim().toLowerCase();
+  if (!k) return '';
+  if (k === 'fully furnished' || k === 'fully'  || k === 'ff') return 'Fully Furnished';
+  if (k === 'partly furnished'|| k === 'partial'|| k === 'pf' || k === 'semi furnished' || k === 'semi') return 'Partly Furnished';
+  if (k === 'bare unit'       || k === 'bare'   || k === 'unfurnished' || k === 'empty') return 'Bare Unit';
+  if (k === 'room rent'       || k === 'room'   || k === 'room rental') return 'Room Rent';
+  if (k === 'short term rent' || k === 'short term' || k === 'short-term rent' || k === 'short term rental' || k === 'str' || k === 'airbnb') return 'Short Term Rent';
+  return '';
+}
+function normaliseAvailability(v: string): Availability {
+  const k = v.trim().toLowerCase();
+  if (!k) return '';
+  if (k === 'available' || k === 'yes' || k === 'open' || k === 'ready') return 'Available';
+  if (k === 'not available' || k === 'unavailable' || k === 'no' || k === 'closed' || k === 'taken' || k === 'rented' || k === 'sold') return 'NOT Available';
+  return '';
+}
+function normaliseValid(v: string): ValidStatus {
+  const k = v.trim().toLowerCase();
+  if (!k) return '';
+  if (k === 'o' || k === 'yes' || k === 'y' || k === 'true' || k === 'valid' || k === '✓' || k === '✔') return 'O';
+  if (k === 'x' || k === 'no'  || k === 'n' || k === 'false' || k === 'invalid' || k === '✗' || k === '✘') return 'X';
+  return '';
+}
+function normaliseListingType(v: string): ListingType {
+  // Multi-select: keep recognised atoms ('Rent', 'Sale'), join with comma.
+  // Accepts inputs like "rent", "Sale", "Rent / Sale", "rent,sale", etc.
+  const atoms = v.split(/[\s,/|;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const out: string[] = [];
+  for (const a of atoms) {
+    if ((a === 'rent' || a === 'rental' || a === 'lease') && !out.includes('Rent')) out.push('Rent');
+    if ((a === 'sale' || a === 'sell' || a === 'buy')     && !out.includes('Sale')) out.push('Sale');
+  }
+  return out.join(',');
+}
+
 function applyMapping(
   rawRows: string[][],
   mapping: Array<keyof Prospect | '__skip__'>,
@@ -1975,13 +2656,21 @@ function applyMapping(
       const row: Prospect = {
         id: String(Date.now() + i),
         name: '', unitNo: '', type: '', size: '', phone: '', agent: '', lastUpdate: '',
-        callingStatus: '', listingType: '', furnishing: '',
-        availability: '', askingRent: '', askingPrice: '', remark: '',
+        callingStatus: '', valid: '', listingType: '', furnishing: '',
+        availability: '', unitStatus: '', askingRent: '', askingPrice: '', remark: '',
       };
       mapping.forEach((sysKey, colIdx) => {
         if (sysKey === '__skip__') return;
-        const val = (cells[colIdx] ?? '').trim();
-        (row as unknown as Record<string, string>)[sysKey] = val;
+        const raw = (cells[colIdx] ?? '').trim();
+        // `valid` is the one column that still has a strict DB CHECK
+        // (O / X / ''), so normalise loose inputs into the canonical set.
+        if (sysKey === 'valid') { row.valid = normaliseValid(raw); return; }
+        // Everything else (calling status, listing type, condition,
+        // availability, unit status) is now free-form — any value the user
+        // typed in the CSV becomes a usable chip. If the value isn't yet a
+        // preset, the chip still renders (in a neutral grey) and a user with
+        // `dropdowns.manage` can add it as a workspace preset later.
+        (row as unknown as Record<string, string>)[sysKey] = raw;
       });
       return row;
     })
@@ -2012,8 +2701,8 @@ function DropdownCell<T extends string>({ value, options, styleMap, onChange }: 
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
   return (
-    <div ref={ref} className="relative w-full h-full flex items-center">
-      <button onClick={() => setOpen((o) => !o)} className="w-full h-full flex items-center gap-1.5 px-2 py-1 group">
+    <div ref={ref} className="relative w-full flex items-center" style={{ minHeight: 36 }}>
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1.5 px-2 group" style={{ minHeight: 36 }}>
         {value ? <Badge label={value} styleMap={styleMap} /> : <span className="text-xs text-gray-300">—</span>}
         <ChevronDown size={11} className="ml-auto flex-shrink-0 text-gray-300 group-hover:text-gray-500" />
       </button>
@@ -2059,8 +2748,8 @@ function MultiSelectDropdownCell({ value, options, styleMap, onChange }: {
   };
 
   return (
-    <div ref={ref} className="relative w-full h-full flex items-center">
-      <button onClick={() => setOpen((o) => !o)} className="w-full h-full flex items-center gap-1 px-2 py-1 group">
+    <div ref={ref} className="relative w-full flex items-center" style={{ minHeight: 36 }}>
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1 px-2 group" style={{ minHeight: 36 }}>
         {selected.length > 0 ? (
           <div className="flex items-center gap-1 flex-wrap min-w-0">
             {selected.map((s) => <Badge key={s} label={s} styleMap={styleMap} />)}
@@ -2164,8 +2853,10 @@ function AgentDropdown({ value, presets, canManage, onChange, onAddPreset, onRem
   };
 
   return (
-    <div ref={ref} className="relative w-full h-full flex items-center">
-      <button onClick={() => setOpen((o) => !o)} className="w-full h-full flex items-center gap-1.5 px-2 py-1 group">
+    <div ref={ref} className="relative w-full flex items-center" style={{ minHeight: 36 }}>
+      <button onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-1.5 px-2 group"
+        style={{ minHeight: 36 }}>
         {value
           ? <AgentBadge name={value} color={matched?.color ?? 'gray'} />
           : <span className="text-xs text-gray-300">—</span>}
@@ -2284,17 +2975,293 @@ function AgentDropdown({ value, presets, canManage, onChange, onAddPreset, onRem
 }
 
 // ─── Typed wrappers ───────────────────────────────────────────────────────────
-function CallingDropdown({ value, onChange }: { value: CallingStatus; onChange: (v: CallingStatus) => void }) {
-  return <DropdownCell value={value} options={CALLING_OPTIONS} styleMap={CALLING_STATUS_STYLE} onChange={onChange} />;
+// Click-through toggle: '' → 'O' → 'X' → '' (no popup needed for a 3-state cell).
+function ValidDropdown({ value, onChange }: { value: ValidStatus; onChange: (v: ValidStatus) => void }) {
+  const next: Record<ValidStatus, ValidStatus> = { '': 'O', 'O': 'X', 'X': '' };
+  const style = value ? VALID_STYLE[value] : undefined;
+  return (
+    <button
+      onClick={() => onChange(next[value])}
+      className="w-full flex items-center justify-center hover:bg-blue-50/40 transition-colors"
+      style={{ minHeight: 36 }}
+      title="Click to toggle Valid → Invalid → clear">
+      {value
+        ? <span className="inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold"
+            style={{ background: style?.bg, color: style?.text }}>{value}</span>
+        : <span className="text-xs text-gray-300">—</span>}
+    </button>
+  );
 }
-function ListingDropdown({ value, onChange }: { value: ListingType; onChange: (v: ListingType) => void }) {
-  return <MultiSelectDropdownCell value={value} options={LISTING_OPTIONS} styleMap={LISTING_TYPE_STYLE} onChange={onChange} />;
+
+// ─── Customisable single-select dropdown (Calling Status, Condition,
+//      Availability, Unit Status). Reads options + colours from the workspace
+//      `dropdown_presets` table; lets users with `dropdowns.manage` add new
+//      options with a colour picker. The × remove affordance is gated by a
+//      separate `dropdowns.remove_options` permission (destructive action). ──
+function CustomDropdown({ value, presets, canManage, canRemove, onChange, onAddPreset, onRemovePreset }: {
+  value: string;
+  presets: DropdownPreset[];        // already filtered to one field
+  canManage: boolean;
+  canRemove: boolean;
+  onChange: (v: string) => void;
+  onAddPreset: (label: string, color: DropdownColor) => Promise<void> | void;
+  onRemovePreset: (id: string) => Promise<void> | void;
+}) {
+  const [open, setOpen]     = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft]   = useState('');
+  const [pickedColor, setPickedColor] = useState<DropdownColor>('teal');
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setAdding(false); } };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  // Show the chip with the colour stored on its preset row. Unknown values
+  // (e.g. legacy data with a preset that was later removed) get a neutral grey.
+  const toneFor = (label: string): { background: string; color: string } => {
+    const p = presets.find((x) => x.value === label);
+    const pal = (p && AGENT_COLOR_PALETTE[p.color]) ?? AGENT_FALLBACK;
+    return { background: pal.bg, color: pal.text };
+  };
+
+  const submitNew = async () => {
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    await onAddPreset(trimmed, pickedColor);
+    onChange(trimmed);
+    setDraft(''); setAdding(false); setOpen(false); setPickedColor('teal');
+  };
+
+  return (
+    <div ref={ref} className="relative w-full flex items-center" style={{ minHeight: 36 }}>
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1.5 px-2 group" style={{ minHeight: 36 }}>
+        {value
+          ? <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium whitespace-nowrap"
+              style={toneFor(value)}>{value}</span>
+          : <span className="text-xs text-gray-300">—</span>}
+        <ChevronDown size={11} className="ml-auto flex-shrink-0 text-gray-300 group-hover:text-gray-500" />
+      </button>
+
+      {open && (
+        <div className="absolute top-full left-0 mt-1 min-w-[180px] bg-white rounded-lg border border-gray-100 py-1 z-50"
+          style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.10)' }}>
+          {presets.length === 0 && !adding && (
+            <p className="px-3 py-1.5 text-xs text-gray-400">No options yet.</p>
+          )}
+          {presets.map((p) => (
+            <div key={p.id} className="flex items-center group/opt">
+              <button onClick={() => { onChange(p.value); setOpen(false); }}
+                className="flex-1 text-left px-3 py-1.5 text-xs hover:bg-gray-50">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-md font-medium"
+                  style={toneFor(p.value)}>{p.value}</span>
+              </button>
+              {canRemove && (
+                <button onMouseDown={(e) => { e.preventDefault(); void onRemovePreset(p.id); }}
+                  title="Remove option"
+                  className="opacity-0 group-hover/opt:opacity-100 px-2 py-1 text-gray-300 hover:text-red-500 transition-opacity">
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+          ))}
+          {value && (
+            <button onClick={() => { onChange(''); setOpen(false); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50 border-t border-gray-100">Clear</button>
+          )}
+          {canManage && !adding && (
+            <button onClick={() => setAdding(true)}
+              className="w-full text-left px-3 py-1.5 text-xs font-semibold hover:bg-gray-50 border-t border-gray-100"
+              style={{ color: '#0F766E' }}>
+              + Add custom…
+            </button>
+          )}
+          {canManage && adding && (
+            <div className="px-2 py-2 border-t border-gray-100 space-y-1.5">
+              <input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void submitNew(); if (e.key === 'Escape') { setAdding(false); setDraft(''); } }}
+                placeholder="New option…"
+                className="w-full px-2 py-1 border rounded text-xs outline-none focus:border-[#1EC9C4]"
+                style={{ borderColor: '#E5E7EB' }} />
+              <div className="flex flex-wrap gap-1">
+                {AGENT_COLOR_KEYS.map((key) => {
+                  const pal = AGENT_COLOR_PALETTE[key];
+                  const selected = pickedColor === key;
+                  return (
+                    <button key={key} type="button"
+                      onMouseDown={(e) => { e.preventDefault(); setPickedColor(key as DropdownColor); }}
+                      title={key}
+                      className="w-5 h-5 rounded-full flex items-center justify-center transition-transform hover:scale-110"
+                      style={{ background: pal.swatch, boxShadow: selected ? `0 0 0 2px white, 0 0 0 4px ${pal.swatch}` : 'none' }}>
+                      {selected && <Check size={10} className="text-white" strokeWidth={3} />}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex items-center justify-between gap-1 pt-1">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium"
+                  style={{ background: AGENT_COLOR_PALETTE[pickedColor].bg, color: AGENT_COLOR_PALETTE[pickedColor].text }}>
+                  {draft.trim() || 'Preview'}
+                </span>
+                <div className="flex gap-1">
+                  <button onMouseDown={(e) => { e.preventDefault(); setAdding(false); setDraft(''); setPickedColor('teal'); }}
+                    className="text-[10px] text-gray-500 hover:text-gray-700 px-2 py-0.5">Cancel</button>
+                  <button onMouseDown={(e) => { e.preventDefault(); void submitNew(); }}
+                    disabled={!draft.trim()}
+                    className="text-[10px] font-bold text-white px-2 py-0.5 rounded disabled:opacity-40"
+                    style={{ background: '#1EC9C4' }}>Add</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
-function FurnishingDropdown({ value, onChange }: { value: Furnishing; onChange: (v: Furnishing) => void }) {
-  return <DropdownCell value={value} options={FURNISHING_OPTIONS} styleMap={FURNISHING_STYLE} onChange={onChange} />;
-}
-function AvailabilityDropdown({ value, onChange }: { value: Availability; onChange: (v: Availability) => void }) {
-  return <DropdownCell value={value} options={AVAILABILITY_OPTIONS} styleMap={AVAILABILITY_STYLE} onChange={onChange} />;
+
+// ─── Customisable multi-select (Listing Type). Stores a comma-separated value,
+//      reads options from `dropdown_presets`, supports + Add custom + colour
+//      and an optional × remove (gated by `dropdowns.remove_options`).
+function CustomMultiDropdown({ value, presets, canManage, canRemove, onChange, onAddPreset, onRemovePreset }: {
+  value: string;                    // comma-separated, e.g. 'Rent,Sale'
+  presets: DropdownPreset[];        // filtered to one field
+  canManage: boolean;
+  canRemove: boolean;
+  onChange: (v: string) => void;
+  onAddPreset: (label: string, color: DropdownColor) => Promise<void> | void;
+  onRemovePreset: (id: string) => Promise<void> | void;
+}) {
+  const [open, setOpen]     = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft]   = useState('');
+  const [pickedColor, setPickedColor] = useState<DropdownColor>('teal');
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setAdding(false); } };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const selected = value ? value.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const toggle = (opt: string) => {
+    const next = selected.includes(opt) ? selected.filter((s) => s !== opt) : [...selected, opt];
+    onChange(next.join(','));
+  };
+  const toneFor = (label: string) => {
+    const p = presets.find((x) => x.value === label);
+    const pal = (p && AGENT_COLOR_PALETTE[p.color]) ?? AGENT_FALLBACK;
+    return { background: pal.bg, color: pal.text };
+  };
+
+  const submitNew = async () => {
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    await onAddPreset(trimmed, pickedColor);
+    // Add the new value to the selected set on this row immediately.
+    if (!selected.includes(trimmed)) onChange([...selected, trimmed].join(','));
+    setDraft(''); setAdding(false); setPickedColor('teal');
+  };
+
+  return (
+    <div ref={ref} className="relative w-full flex items-center" style={{ minHeight: 36 }}>
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1 px-2 group" style={{ minHeight: 36 }}>
+        {selected.length > 0
+          ? <div className="flex flex-wrap gap-1 overflow-hidden">
+              {selected.map((s) => (
+                <span key={s} className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium whitespace-nowrap"
+                  style={toneFor(s)}>{s}</span>
+              ))}
+            </div>
+          : <span className="text-xs text-gray-300">—</span>}
+        <ChevronDown size={11} className="ml-auto flex-shrink-0 text-gray-300 group-hover:text-gray-500" />
+      </button>
+
+      {open && (
+        <div className="absolute top-full left-0 mt-1 min-w-[180px] bg-white rounded-lg border border-gray-100 py-1 z-50"
+          style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.10)' }}>
+          {presets.length === 0 && !adding && (
+            <p className="px-3 py-1.5 text-xs text-gray-400">No options yet.</p>
+          )}
+          {presets.map((p) => {
+            const checked = selected.includes(p.value);
+            return (
+              <div key={p.id} className="flex items-center group/opt">
+                <button onClick={() => toggle(p.value)}
+                  className="flex-1 flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-gray-50">
+                  <span className="w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0"
+                    style={{ borderColor: checked ? '#1EC9C4' : '#D1D5DB', background: checked ? '#1EC9C4' : 'transparent' }}>
+                    {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                  </span>
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-md font-medium"
+                    style={toneFor(p.value)}>{p.value}</span>
+                </button>
+                {canRemove && (
+                  <button onMouseDown={(e) => { e.preventDefault(); void onRemovePreset(p.id); }}
+                    title="Remove option"
+                    className="opacity-0 group-hover/opt:opacity-100 px-2 py-1 text-gray-300 hover:text-red-500 transition-opacity">
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {selected.length > 0 && (
+            <button onClick={() => onChange('')}
+              className="w-full text-left px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50 border-t border-gray-100">Clear all</button>
+          )}
+          {canManage && !adding && (
+            <button onClick={() => setAdding(true)}
+              className="w-full text-left px-3 py-1.5 text-xs font-semibold hover:bg-gray-50 border-t border-gray-100"
+              style={{ color: '#0F766E' }}>
+              + Add custom…
+            </button>
+          )}
+          {canManage && adding && (
+            <div className="px-2 py-2 border-t border-gray-100 space-y-1.5">
+              <input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void submitNew(); if (e.key === 'Escape') { setAdding(false); setDraft(''); } }}
+                placeholder="New option…"
+                className="w-full px-2 py-1 border rounded text-xs outline-none focus:border-[#1EC9C4]"
+                style={{ borderColor: '#E5E7EB' }} />
+              <div className="flex flex-wrap gap-1">
+                {AGENT_COLOR_KEYS.map((key) => {
+                  const pal = AGENT_COLOR_PALETTE[key];
+                  const isSelected = pickedColor === key;
+                  return (
+                    <button key={key} type="button"
+                      onMouseDown={(e) => { e.preventDefault(); setPickedColor(key as DropdownColor); }}
+                      title={key}
+                      className="w-5 h-5 rounded-full flex items-center justify-center transition-transform hover:scale-110"
+                      style={{ background: pal.swatch, boxShadow: isSelected ? `0 0 0 2px white, 0 0 0 4px ${pal.swatch}` : 'none' }}>
+                      {isSelected && <Check size={10} className="text-white" strokeWidth={3} />}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex items-center justify-between gap-1 pt-1">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium"
+                  style={{ background: AGENT_COLOR_PALETTE[pickedColor].bg, color: AGENT_COLOR_PALETTE[pickedColor].text }}>
+                  {draft.trim() || 'Preview'}
+                </span>
+                <div className="flex gap-1">
+                  <button onMouseDown={(e) => { e.preventDefault(); setAdding(false); setDraft(''); setPickedColor('teal'); }}
+                    className="text-[10px] text-gray-500 hover:text-gray-700 px-2 py-0.5">Cancel</button>
+                  <button onMouseDown={(e) => { e.preventDefault(); void submitNew(); }}
+                    disabled={!draft.trim()}
+                    className="text-[10px] font-bold text-white px-2 py-0.5 rounded disabled:opacity-40"
+                    style={{ background: '#1EC9C4' }}>Add</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Text cell ────────────────────────────────────────────────────────────────
@@ -2316,9 +3283,58 @@ function TextCell({ value, onChange, align = 'left', mono = false, placeholder =
     );
   }
   return (
-    <button onDoubleClick={() => setEditing(true)} className="w-full h-full flex items-center px-2 py-1 hover:bg-blue-50/40 transition-colors" style={{ justifyContent: align === 'center' ? 'center' : undefined }}>
+    <button onDoubleClick={() => setEditing(true)} className="w-full flex items-center px-2 hover:bg-blue-50/40 transition-colors" style={{ minHeight: 36, justifyContent: align === 'center' ? 'center' : undefined }}>
       <span className="text-xs truncate" style={{ fontFamily: mono ? 'JetBrains Mono, monospace' : undefined, color: value ? '#2B3340' : '#D1D5DB' }}>{value || placeholder}</span>
     </button>
+  );
+}
+
+// ─── Phone cell wrapper ─────────────────────────────────────────────────────
+// TextCell + WhatsAppButton in one. The WA launcher is only shown when the
+// cell is being hovered OR its popup is currently open; that pairing keeps
+// the cell visually clean while preventing the "disappearing button" feel
+// once the popup is up and the cursor leaves the cell to reach it.
+function PhoneCell({ row, onChange, agentName, boardName, templates, lang, onLangChange, canSend, onManageTemplates, align = 'left', mono = false, placeholder = '' }: {
+  row: Prospect;
+  onChange: (v: string) => void;
+  agentName: string;
+  boardName?: string;
+  templates: WaTemplate[];
+  lang: WaLang;
+  onLangChange: (next: WaLang) => void;
+  canSend: boolean;
+  onManageTemplates?: () => void;
+  align?: 'left' | 'center';
+  mono?: boolean;
+  placeholder?: string;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [popupOpen, setPopupOpen] = useState(false);
+  const showLauncher = canSend && !!row.phone && (hovered || popupOpen);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className="relative w-full flex items-center"
+      style={{ minHeight: 36 }}>
+      <div className="flex-1 min-w-0">
+        <TextCell value={row.phone} onChange={onChange} align={align} mono={mono} placeholder={placeholder} />
+      </div>
+      {showLauncher && (
+        <div className="absolute right-1 top-1/2 -translate-y-1/2">
+          <WhatsAppButton
+            row={row}
+            agentName={agentName}
+            boardName={boardName}
+            templates={templates}
+            lang={lang}
+            onLangChange={onLangChange}
+            onOpenChange={setPopupOpen}
+            onManageTemplates={onManageTemplates}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2379,8 +3395,10 @@ const PRICE_MAX = 5000000;   // RM
 // Filter values are arrays — empty array means "no filter" (i.e. show all).
 interface Filters {
   callingStatus: string[];
+  valid:         string[];
   furnishing:    string[];
   availability:  string[];
+  unitStatus:    string[];
   agent:         string[];
   askingRentRange:  [number, number];
   askingPriceRange: [number, number];
@@ -2570,15 +3588,26 @@ function FilterMultiSelect({ label, options, selected, onChange }: {
   );
 }
 
-function FilterBar({ filters, setFilters, agentOptions, onClose }: { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; agentOptions: string[]; onClose: () => void }) {
+function FilterBar({ filters, setFilters, agentOptions, callingOptions, conditionOptions, availabilityOptions, unitStatusOptions, onClose }: {
+  filters: Filters;
+  setFilters: React.Dispatch<React.SetStateAction<Filters>>;
+  agentOptions: string[];
+  callingOptions: string[];
+  conditionOptions: string[];
+  availabilityOptions: string[];
+  unitStatusOptions: string[];
+  onClose: () => void;
+}) {
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 bg-[#FAFBFC] overflow-x-auto whitespace-nowrap">
       <span className="text-xs font-semibold text-gray-500 flex-shrink-0">Filters</span>
       {[
-        { label: 'Status',       key: 'callingStatus' as const, opts: CALLING_OPTIONS.filter(Boolean) },
-        { label: 'Furnishing',   key: 'furnishing'    as const, opts: FURNISHING_OPTIONS.filter(Boolean) },
-        { label: 'Availability', key: 'availability'  as const, opts: AVAILABILITY_OPTIONS.filter(Boolean) },
         { label: 'Agent',        key: 'agent'         as const, opts: agentOptions },
+        { label: 'Status',       key: 'callingStatus' as const, opts: callingOptions },
+        { label: 'Valid',        key: 'valid'         as const, opts: VALID_OPTIONS.filter(Boolean) },
+        { label: 'Condition',    key: 'furnishing'    as const, opts: conditionOptions },
+        { label: 'Availability', key: 'availability'  as const, opts: availabilityOptions },
+        { label: 'Unit Status',  key: 'unitStatus'    as const, opts: unitStatusOptions },
       ].map(({ label, key, opts }) => (
         <FilterMultiSelect
           key={key}
@@ -2621,7 +3650,7 @@ function FilterBar({ filters, setFilters, agentOptions, onClose }: { filters: Fi
         />
       </div>
 
-      <button onClick={() => setFilters({ callingStatus: [], furnishing: [], availability: [], agent: [], askingRentRange: [0, RENT_MAX], askingPriceRange: [0, PRICE_MAX] })} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 flex-shrink-0"><X size={12} /> Clear</button>
+      <button onClick={() => setFilters({ callingStatus: [], valid: [], furnishing: [], availability: [], unitStatus: [], agent: [], askingRentRange: [0, RENT_MAX], askingPriceRange: [0, PRICE_MAX] })} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 flex-shrink-0"><X size={12} /> Clear</button>
       <button onClick={onClose} className="ml-auto text-gray-400 hover:text-gray-600 flex-shrink-0"><X size={14} /></button>
     </div>
   );
@@ -2901,7 +3930,7 @@ function ImportModal({ onClose, onImport }: {
 
               <div className="rounded-xl p-3" style={{ background: '#F8FAFB' }}>
                 <p className="text-xs font-semibold mb-1" style={{ color: '#6B7280' }}>Any CSV works — you'll map columns in the next step.</p>
-                <p className="text-xs" style={{ color: '#9CA3AF' }}>System fields: Name · Unit No · Type · Size · Phone · Calling Status · Listing Type · Furnishing · Availability · Asking RENT · Asking PRICE · Remark</p>
+                <p className="text-xs" style={{ color: '#9CA3AF' }}>System fields: Name · Unit No · Type · Size · Phone · Agent · Calling Status · Valid · Listing Type · Condition · Availability · Unit Status · Asking RENT · Asking PRICE · Last Update · Remark</p>
               </div>
             </>
           )}
@@ -3126,6 +4155,75 @@ function ImportModal({ onClose, onImport }: {
   );
 }
 
+// ─── Column-width persistence ────────────────────────────────────────────────
+// Per-user UI preference; lives in localStorage rather than the DB so it
+// doesn't roundtrip on every render and isn't tied to a particular board.
+const COLUMN_WIDTHS_KEY = 'we.column_widths';
+function loadColumnWidths(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(COLUMN_WIDTHS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
+}
+function saveColumnWidth(key: string, width: number): void {
+  try {
+    const all = loadColumnWidths();
+    all[key] = width;
+    localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(all));
+  } catch { /* ignore — non-critical */ }
+}
+
+// ─── Column resize handle ────────────────────────────────────────────────────
+// 6px-wide invisible grip on the right edge of each header cell. Drag to
+// resize; commits + persists on mouseup. Hidden entirely when the user lacks
+// `columns.resize` so viewers don't see a misleading affordance.
+function ColumnResizer({ width, onResize }: {
+  width: number;
+  onResize: (next: number) => void;
+}) {
+  const onMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = width;
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      // Clamp to a sane range so a column can't disappear or grow off-screen.
+      const next = Math.max(60, Math.min(600, Math.round(startW + delta)));
+      onResize(next);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      onClick={(e) => e.stopPropagation()}
+      title="Drag to resize"
+      style={{
+        position: 'absolute',
+        top: 0, right: -3, bottom: 0,
+        width: 6, cursor: 'col-resize', zIndex: 2,
+      }}
+      // Visible teal hover stripe so users can find the handle.
+      className="group/resize">
+      <div className="opacity-0 group-hover/resize:opacity-100 transition-opacity"
+        style={{ position: 'absolute', top: 4, bottom: 4, right: 2, width: 2, background: '#1EC9C4', borderRadius: 1 }} />
+    </div>
+  );
+}
+
 // ─── Column definitions ───────────────────────────────────────────────────────
 type ColType = 'text' | 'select' | 'custom-select' | 'readonly';
 interface ColDef {
@@ -3137,24 +4235,29 @@ interface ColDef {
   align?: 'left' | 'center';
   placeholder?: string;
   fixed?: boolean; // system columns — label not editable / not deletable
-  selectKey?: 'callingStatus' | 'listingType' | 'furnishing' | 'availability';
+  selectKey?: 'callingStatus' | 'listingType' | 'furnishing' | 'availability' | 'valid' | 'unitStatus';
   options?: string[]; // for custom-select columns
 }
 
 const BASE_COLUMNS: ColDef[] = [
-  { key: 'name',          label: 'Name',          width: 220, type: 'text',   fixed: true },
+  { key: 'name',          label: 'Name',           width: 220, type: 'text',   fixed: true },
   { key: 'unitNo',        label: 'Unit No',        width: 96,  type: 'text',   fixed: true, mono: true },
   { key: 'type',          label: 'Type',           width: 72,  type: 'text',   fixed: true, align: 'center' },
   { key: 'size',          label: 'Size (sqft)',    width: 88,  type: 'text',   fixed: true, align: 'center', mono: true },
   { key: 'phone',         label: 'Phone',          width: 180, type: 'text',   fixed: true, mono: true },
+  // Agent now lives in the identity rail (left of the data columns).
+  { key: 'agent',         label: 'Agent',          width: 130, type: 'readonly', fixed: true },
   { key: 'callingStatus', label: 'Calling Status', width: 130, type: 'select', fixed: true, selectKey: 'callingStatus' },
+  { key: 'valid',         label: 'Valid',          width: 80,  type: 'select', fixed: true, selectKey: 'valid' },
   { key: 'listingType',   label: 'Listing Type',   width: 120, type: 'select', fixed: true, selectKey: 'listingType' },
-  { key: 'furnishing',    label: 'Furnishing',     width: 148, type: 'select', fixed: true, selectKey: 'furnishing' },
+  // "Condition" replaces "Furnishing" — DB column is still `furnishing`.
+  { key: 'furnishing',    label: 'Condition',      width: 168, type: 'select', fixed: true, selectKey: 'furnishing' },
   { key: 'availability',  label: 'Availability',   width: 130, type: 'select', fixed: true, selectKey: 'availability' },
+  // Unit Status — workspace-wide presets + ad-hoc custom values.
+  { key: 'unitStatus',    label: 'Unit Status',    width: 140, type: 'select', fixed: true, selectKey: 'unitStatus' },
   { key: 'askingRent',    label: 'Asking RENT',    width: 110, type: 'text',   fixed: true, mono: true, placeholder: 'RM —' },
   { key: 'askingPrice',   label: 'Asking PRICE',   width: 120, type: 'text',   fixed: true, mono: true, placeholder: 'RM —' },
   { key: 'remark',        label: 'Remark',         width: 200, type: 'text',   fixed: true, placeholder: 'Add note...' },
-  { key: 'agent',         label: 'Agent',          width: 130, type: 'readonly', fixed: true },
   { key: 'lastUpdate',    label: 'Last Update',    width: 150, type: 'readonly', fixed: true, mono: true },
 ];
 
@@ -3169,8 +4272,8 @@ function CustomSelectCell({ value, options, onChange }: { value: string; options
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
   return (
-    <div ref={ref} className="relative w-full h-full flex items-center">
-      <button onClick={() => setOpen((o) => !o)} className="w-full h-full flex items-center gap-1.5 px-2 py-1 group">
+    <div ref={ref} className="relative w-full flex items-center" style={{ minHeight: 36 }}>
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1.5 px-2 group" style={{ minHeight: 36 }}>
         {value
           ? <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium" style={{ background: '#F3F4F6', color: '#374151' }}>{value}</span>
           : <span className="text-xs text-gray-300">—</span>}
@@ -3452,6 +4555,7 @@ export default function ProspectHub() {
   const [folders, setFolders]                   = useState<Folder[]>([]);
   const [folderMembers, setFolderMembers]       = useState<Record<string, BoardMember[]>>({});
   const [agentPresets, setAgentPresets]         = useState<AgentPreset[]>([]);
+  const [dropdownPresets, setDropdownPresets]   = useState<DropdownPreset[]>([]);
   const [recycleBin, setRecycleBin]             = useState<RecycledItem[]>([]);
   const [loadingHub, setLoadingHub]             = useState(true);
   const [showRecycleBin, setShowRecycleBin]     = useState(false);
@@ -3527,15 +4631,17 @@ export default function ProspectHub() {
   // ── Boot: hydrate everything from Supabase on first mount ────────────────
   const refreshHub = useCallback(async () => {
     try {
-      const [b, p, f, bm, fm, ag, rb] = await Promise.all([
+      const [b, p, f, bm, fm, ag, dp, rb] = await Promise.all([
         boardsApi.listBoards(),
         prospectsApi.listAllProspects(),
         foldersApi.listFolders(),
         membersApi.listAllBoardMembers(),
         membersApi.listAllFolderMembers(),
         agentsApi.listAgentPresets(),
+        dropdownPresetsApi.listDropdownPresets(),
         recycleApi.listRecycleBin(),
       ]);
+      setDropdownPresets(dp);
 
       setBoards(b.map(boardFromApi));
       setBoardProspects(p);
@@ -3598,8 +4704,9 @@ export default function ProspectHub() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'folders' },        scheduleRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'board_members' },  scheduleRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'folder_members' }, scheduleRefresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_presets' },  scheduleRefresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'recycle_bin' },    scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_presets' },     scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dropdown_presets' },  scheduleRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recycle_bin' },       scheduleRefresh)
       .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -3632,6 +4739,32 @@ export default function ProspectHub() {
     setAgentPresets((prev) => prev.filter((p) => p.id !== id));
     try { await agentsApi.deleteAgentPreset(id); }
     catch (e) { notifyError('Could not remove agent', e); void refreshHub(); }
+  };
+
+  // Workspace-wide dropdown preset CRUD — gated by `dropdowns.manage` (add)
+  // and `dropdowns.remove_options` (delete). Used by every customisable column
+  // (Calling Status, Listing Type, Condition, Availability, Unit Status).
+  // Optimistic; realtime broadcast keeps every open tab in sync.
+  const addDropdownPreset = async (field: DropdownField, value: string, color: DropdownColor) => {
+    if (!can('dropdowns.manage')) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    // De-dupe case-insensitively against existing options for the same field.
+    if (dropdownPresets.some((p) => p.field === field && p.value.toLowerCase() === trimmed.toLowerCase())) return;
+    try {
+      const created = await dropdownPresetsApi.addDropdownPreset(field, trimmed, color);
+      setDropdownPresets((prev) => [...prev, created]);
+    } catch (e) { notifyError('Could not add option', e); }
+  };
+  const removeDropdownPreset = async (id: string) => {
+    if (!can('dropdowns.remove_options')) return;
+    // Optimistic remove. Existing row values that referenced this option
+    // stay as-is — the chip just renders in a neutral grey until cleaned up
+    // or re-assigned. (Cascading-rewrite isn't safe by default — the agent
+    // may have meant the value, just not the preset.)
+    setDropdownPresets((prev) => prev.filter((p) => p.id !== id));
+    try { await dropdownPresetsApi.removeDropdownPreset(id); }
+    catch (e) { notifyError('Could not remove option', e); void refreshHub(); }
   };
 
   const memberCounts: Record<string, number> = {};
@@ -3955,7 +5088,7 @@ export default function ProspectHub() {
   const [search, setSearch] = useState('');
   const [quickView, setQuickView] = useState<QuickView>('All');
   const [showFilter, setShowFilter] = useState(false);
-  const [filters, setFilters] = useState<Filters>({ callingStatus: [], furnishing: [], availability: [], agent: [], askingRentRange: [0, RENT_MAX], askingPriceRange: [0, PRICE_MAX] });
+  const [filters, setFilters] = useState<Filters>({ callingStatus: [], valid: [], furnishing: [], availability: [], unitStatus: [], agent: [], askingRentRange: [0, RENT_MAX], askingPriceRange: [0, PRICE_MAX] });
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [rowMenu, setRowMenu] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [showImport, setShowImport] = useState(false);
@@ -3963,13 +5096,23 @@ export default function ProspectHub() {
   const [showAddField, setShowAddField] = useState(false);
 
   // ── Dynamic columns (base + custom) ──────────────────────────────────────
-  const [columns, setColumns] = useState<ColDef[]>(BASE_COLUMNS);
+  // Per-user column widths persist in localStorage so a resize sticks across
+  // page reloads (no DB round-trip for what's essentially a UI preference).
+  const [columns, setColumns] = useState<ColDef[]>(() => {
+    const saved = loadColumnWidths();
+    return BASE_COLUMNS.map((c) => (saved[c.key] != null ? { ...c, width: saved[c.key] } : c));
+  });
   // Custom field values: { rowId: { colKey: value } }
   const [customValues, setCustomValues] = useState<Record<string, Record<string, string>>>({});
 
   const renameColumn = (key: string, label: string) => {
     if (!can('columns.edit')) return;
     setColumns((prev) => prev.map((c) => c.key === key ? { ...c, label } : c));
+  };
+  const resizeColumn = (key: string, width: number) => {
+    if (!can('columns.resize')) return;
+    setColumns((prev) => prev.map((c) => c.key === key ? { ...c, width } : c));
+    saveColumnWidth(key, width);
   };
   const deleteColumn = (key: string) => {
     if (!can('columns.delete')) return;
@@ -3993,6 +5136,29 @@ export default function ProspectHub() {
   // ── Space-pan ─────────────────────────────────────────────────────────────
   const gridScrollRef = useRef<HTMLDivElement>(null);
   const isPanning = useSpacePan(gridScrollRef);
+
+  // View → Locked/Unlocked. Unlocked enables click-drag panning + zoom
+  // controls so the grid behaves like a canvas. Persists per-user via
+  // localStorage so the preference survives reloads.
+  const [viewUnlocked, setViewUnlocked] = useState<boolean>(() => {
+    try { return localStorage.getItem('we.view.unlocked') === '1'; } catch { return false; }
+  });
+  const [gridZoom, setGridZoom] = useState<number>(() => {
+    try { const v = Number(localStorage.getItem('we.view.zoom')); return Number.isFinite(v) && v >= 0.5 && v <= 2 ? v : 1; } catch { return 1; }
+  });
+  useEffect(() => { try { localStorage.setItem('we.view.unlocked', viewUnlocked ? '1' : '0'); } catch { /* ignore */ } }, [viewUnlocked]);
+  useEffect(() => { try { localStorage.setItem('we.view.zoom', String(gridZoom)); } catch { /* ignore */ } }, [gridZoom]);
+  const canPanZoom = can('view.pan_zoom');
+  // Only enable drag-pan when both the permission and the unlock toggle are on.
+  const isDragPanning = useDragPan(gridScrollRef, canPanZoom && viewUnlocked);
+
+  // ── WhatsApp templates (per-user, localStorage-backed) ──────────────────
+  const [waTemplates, setWaTemplates]   = useState<WaTemplate[]>(() => loadWaTemplates());
+  const [waLang, setWaLang]             = useState<WaLang>(() => loadWaLang());
+  const [showWaTemplates, setShowWaTemplates] = useState(false);
+  useEffect(() => { saveWaLang(waLang); }, [waLang]);
+  const canManageWaTemplates = can('whatsapp.manage_templates');
+  const canSendWa            = can('whatsapp.send');
 
   // ── Row virtualization ────────────────────────────────────────────────────
   // Only render the rows currently in the viewport. Prevents the table from
@@ -4035,16 +5201,35 @@ export default function ProspectHub() {
   const [fillRange, setFillRange] = useState<Set<string>>(new Set());
   const [activeCell, setActiveCell] = useState<{ rowId: string; colKey: string } | null>(null);
 
-  // ── Distinct agents across the current row set (drives Agent filter dropdown).
-  // Rows with no agent are excluded — only surface actual nicknames.
+  // ── Agent filter dropdown options.
+  // Combines the workspace-wide preset list with any agent names that appear
+  // on existing rows — so presets are pickable even before they've been
+  // assigned, and legacy free-text agents stay surfaced.
   const agentOptions = useMemo(() => {
     const set = new Set<string>();
+    for (const p of agentPresets) {
+      const name = p.name.trim();
+      if (name) set.add(name);
+    }
     for (const r of rows) {
       const a = r.agent.trim();
       if (a) set.add(a);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [rows]);
+  }, [rows, agentPresets]);
+
+  // ── Bucket the workspace dropdown_presets by field for O(1) lookup in
+  //    cell renders and filter chips.
+  const dropdownPresetsByField = useMemo(() => {
+    const out: Record<DropdownField, DropdownPreset[]> = {
+      calling_status: [], listing_type: [], furnishing: [], availability: [], unit_status: [],
+    };
+    for (const p of dropdownPresets) {
+      if (out[p.field]) out[p.field].push(p);
+    }
+    // Each field preserves the DB `position` ordering (already sorted by API).
+    return out;
+  }, [dropdownPresets]);
 
   // ── Counts for quick view tabs ────────────────────────────────────────────
   const counts: Record<QuickView, number> = useMemo(() => {
@@ -4062,8 +5247,10 @@ export default function ProspectHub() {
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     const callingSet = new Set(filters.callingStatus);
+    const validSet   = new Set(filters.valid);
     const furnishSet = new Set(filters.furnishing);
     const availSet   = new Set(filters.availability);
+    const unitStSet  = new Set(filters.unitStatus);
     const agentSet   = new Set(filters.agent);
     const fullRent  = filters.askingRentRange[0]  === 0 && filters.askingRentRange[1]  === RENT_MAX;
     const fullPrice = filters.askingPriceRange[0] === 0 && filters.askingPriceRange[1] === PRICE_MAX;
@@ -4073,9 +5260,11 @@ export default function ProspectHub() {
       const matchQuick   = quickView === 'All' || r.listingType.split(',').map((s) => s.trim()).includes(quickView);
       if (!matchQuick) return false;
       if (callingSet.size > 0 && !callingSet.has(r.callingStatus)) return false;
-      if (furnishSet.size > 0 && !furnishSet.has(r.furnishing)) return false;
-      if (availSet.size  > 0 && !availSet.has(r.availability))  return false;
-      if (agentSet.size  > 0 && !agentSet.has(r.agent))         return false;
+      if (validSet.size   > 0 && !validSet.has(r.valid))           return false;
+      if (furnishSet.size > 0 && !furnishSet.has(r.furnishing))    return false;
+      if (availSet.size   > 0 && !availSet.has(r.availability))    return false;
+      if (unitStSet.size  > 0 && !unitStSet.has(r.unitStatus))     return false;
+      if (agentSet.size   > 0 && !agentSet.has(r.agent))           return false;
       if (!fullRent) {
         const rent = parseMoney(r.askingRent);
         if (rent < filters.askingRentRange[0] || rent > filters.askingRentRange[1]) return false;
@@ -4725,9 +5914,55 @@ export default function ProspectHub() {
             <button onClick={() => setShowFilter((v) => !v)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors flex-shrink-0 ${showFilter ? 'border-[#1EC9C4] text-[#1EC9C4] bg-[#DAF3F2]' : 'border-gray-200 text-gray-600 hover:border-gray-300 bg-white'}`}>
               <Filter size={13} /> Filter
-              {(filters.callingStatus.length > 0 || filters.furnishing.length > 0 || filters.availability.length > 0 || filters.agent.length > 0) && <span className="w-2 h-2 rounded-full bg-[#1EC9C4]" />}
+              {(filters.callingStatus.length > 0 || filters.valid.length > 0 || filters.furnishing.length > 0 || filters.availability.length > 0 || filters.unitStatus.length > 0 || filters.agent.length > 0) && <span className="w-2 h-2 rounded-full bg-[#1EC9C4]" />}
             </button>
           )}
+
+          {/* View — locked = normal interactions; unlocked = drag-to-pan + zoom.
+              Rendered as a single segment-control so the buttons always read
+              as one unit. Each segment carries its own border so the dividers
+              are consistent and the heights match. */}
+          {canPanZoom && (() => {
+            const baseBorder    = viewUnlocked ? '#1EC9C4' : '#E5E7EB';
+            const segBg         = viewUnlocked ? '#DAF3F2' : '#FFFFFF';
+            const segText       = viewUnlocked ? '#1EC9C4' : '#6B7280';
+            const segHover      = viewUnlocked ? 'hover:bg-[#CDEFEC]' : 'hover:bg-gray-50';
+            const segClass = `inline-flex items-center justify-center h-7 px-2.5 border-y text-xs font-semibold transition-colors ${segHover} disabled:opacity-40 disabled:cursor-not-allowed`;
+            return (
+              <div className="inline-flex items-stretch flex-shrink-0 rounded-lg overflow-hidden"
+                style={{ border: `1px solid ${baseBorder}` }}>
+                <button
+                  onClick={() => setViewUnlocked((v) => !v)}
+                  title={viewUnlocked ? 'Lock view (return to normal interactions)' : 'Unlock view (drag to pan, zoom in/out)'}
+                  className={`inline-flex items-center gap-1.5 h-7 px-3 ${segHover} transition-colors`}
+                  style={{ background: segBg, color: segText, borderRight: `1px solid ${baseBorder}` }}>
+                  {viewUnlocked ? <Unlock size={12} /> : <Lock size={12} />}
+                  <span className="text-xs font-semibold leading-none">View</span>
+                </button>
+                <button onClick={() => setGridZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 100) / 100))}
+                  disabled={!viewUnlocked || gridZoom <= 0.5}
+                  title="Zoom out"
+                  className={segClass}
+                  style={{ background: segBg, color: segText, borderColor: baseBorder, borderRight: `1px solid ${baseBorder}`, minWidth: 26 }}>
+                  −
+                </button>
+                <button onClick={() => setGridZoom(1)}
+                  disabled={!viewUnlocked}
+                  title="Reset zoom"
+                  className={`${segClass} tabular-nums`}
+                  style={{ background: segBg, color: segText, borderColor: baseBorder, borderRight: `1px solid ${baseBorder}`, minWidth: 44 }}>
+                  {Math.round(gridZoom * 100)}%
+                </button>
+                <button onClick={() => setGridZoom((z) => Math.min(2, Math.round((z + 0.1) * 100) / 100))}
+                  disabled={!viewUnlocked || gridZoom >= 2}
+                  title="Zoom in"
+                  className={segClass}
+                  style={{ background: segBg, color: segText, borderColor: baseBorder, minWidth: 26 }}>
+                  +
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Import Data — gated by data.import */}
           {can('data.import') && (
@@ -4828,7 +6063,18 @@ export default function ProspectHub() {
       </div>}
 
       {/* ── Filter bar (grid only) ───────────────────────────────────── */}
-      {view === 'grid' && showFilter && <FilterBar filters={filters} setFilters={setFilters} agentOptions={agentOptions} onClose={() => setShowFilter(false)} />}
+      {view === 'grid' && showFilter && (
+        <FilterBar
+          filters={filters}
+          setFilters={setFilters}
+          agentOptions={agentOptions}
+          callingOptions={dropdownPresetsByField.calling_status.map((p) => p.value)}
+          conditionOptions={dropdownPresetsByField.furnishing.map((p) => p.value)}
+          availabilityOptions={dropdownPresetsByField.availability.map((p) => p.value)}
+          unitStatusOptions={dropdownPresetsByField.unit_status.map((p) => p.value)}
+          onClose={() => setShowFilter(false)}
+        />
+      )}
 
       {/* ── Grid (grid only) ────────────────────────────────────────────── */}
       {view === 'grid' && (() => {
@@ -4839,19 +6085,66 @@ export default function ProspectHub() {
           : columns;
         const displayTotalWidth = displayColumns.reduce((s, c) => s + c.width, 0) + 40 + 40 + 80;
 
+        // ── Frozen left columns ────────────────────────────────────────────
+        // Sticky-pin the identifier columns (and the checkbox/row-# rail) so
+        // they stay visible when scrolling horizontally. The frozen set ends
+        // at Phone — matching the existing teal divider that already separated
+        // identity columns from data columns.
+        const FROZEN_KEYS = folderView
+          ? ['projectName', 'name', 'unitNo', 'type', 'size', 'phone']
+          : ['name', 'unitNo', 'type', 'size', 'phone'];
+        const FROZEN_BASE_OFFSET = 80; // checkbox(40) + row #(40)
+        const frozenLeftMap = new Map<string, number>();
+        {
+          let cum = FROZEN_BASE_OFFSET;
+          for (const col of displayColumns) {
+            if (FROZEN_KEYS.includes(col.key)) {
+              frozenLeftMap.set(col.key, cum);
+              cum += col.width;
+            }
+          }
+        }
+        const isFrozenCol = (key: string) => frozenLeftMap.has(key);
+        // z-index ladder: header non-frozen > header frozen-intersection
+        //   header (top:0)             = 10
+        //   header frozen-intersection = 20  (must beat scrolling non-frozen body & header)
+        //   body frozen cell           = 5
+        //   body non-frozen cell       = 0 (default)
+        const Z_HEADER         = 10;
+        const Z_HEADER_FROZEN  = 20;
+        const Z_BODY_FROZEN    = 5;
+
         // Virtualization window: only render rows that fall in the current viewport
         // (plus a small overscan above and below for smoother scroll).
-        const totalRows  = filtered.length;
-        const startIdx   = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - ROW_OVERSCAN);
-        const endIdx     = Math.min(totalRows, Math.ceil((scrollTop + viewportH) / ROW_HEIGHT_PX) + ROW_OVERSCAN);
+        //
+        // CSS `zoom` scales the rendered row height, so a 37px row at 80% zoom
+        // takes ~29.6px in the scroll container's coordinate space. scrollTop /
+        // clientHeight are in the container's (post-zoom) coords, so divide
+        // ROW_HEIGHT_PX × zoom to get the right index. Topbar / bottompad
+        // spacers stay in natural row coords — they're inside the zoomed table,
+        // so the zoom scales them automatically.
+        const totalRows       = filtered.length;
+        const effectiveRowPx  = ROW_HEIGHT_PX * gridZoom;
+        const startIdx   = Math.max(0, Math.floor(scrollTop / effectiveRowPx) - ROW_OVERSCAN);
+        const endIdx     = Math.min(totalRows, Math.ceil((scrollTop + viewportH) / effectiveRowPx) + ROW_OVERSCAN);
         const visibleRows = filtered.slice(startIdx, endIdx);
         const topPad     = startIdx * ROW_HEIGHT_PX;
         const bottomPad  = Math.max(0, (totalRows - endIdx) * ROW_HEIGHT_PX);
         const spacerColSpan = displayColumns.length + 3;
         return (
         <div ref={gridScrollRef} className="flex-1 overflow-auto"
-        style={{ cursor: isPanning ? 'grabbing' : 'default', userSelect: isPanning ? 'none' : undefined }}>
-        <table style={{ minWidth: displayTotalWidth, borderCollapse: 'collapse', tableLayout: 'fixed', width: displayTotalWidth }}>
+        style={{
+          cursor: (isDragPanning || isPanning) ? 'grabbing' : viewUnlocked ? 'grab' : 'default',
+          userSelect: (isDragPanning || isPanning) ? 'none' : undefined,
+        }}>
+        {/* `border-collapse: separate` keeps each cell on its own paint layer —
+            required so sticky frozen cells render their borders consistently
+            (collapse-mode shares borders between cells, which corrupts the
+            teal Phone divider and column lines once cells become sticky).
+            `zoom` is the simplest "make whole sheet bigger/smaller" — every
+            modern browser scales layout + scrollable bounds together, which
+            keeps the existing virtualisation math correct. */}
+        <table style={{ minWidth: displayTotalWidth, borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', width: displayTotalWidth, zoom: gridZoom }}>
           <colgroup>
             <col style={{ width: 40 }} />
             <col style={{ width: 40 }} />
@@ -4860,28 +6153,74 @@ export default function ProspectHub() {
           </colgroup>
 
           {/* ── Header row ── */}
+          {/* `position:sticky` lives on each <th> (not the <tr>) so a header
+              cell can be both top-sticky (frozen header) and left-sticky
+              (frozen column) at the same time. */}
           <thead>
-            <tr style={{ background: '#F8FAFB', borderBottom: '2px solid #E5E7EB', position: 'sticky', top: 0, zIndex: 10 }}>
-              <th style={{ width: 40, borderRight: '1px solid #E5E7EB' }} className="px-2 py-2.5">
+            {/* With border-collapse:separate the <tr>'s borderBottom no longer
+                paints — we put a heavier borderBottom on every <th> instead. */}
+            <tr style={{ background: '#F8FAFB' }}>
+              <th
+                style={{
+                  width: 40,
+                  borderRight: '1px solid #E5E7EB',
+                  borderBottom: '2px solid #E5E7EB',
+                  position: 'sticky', top: 0, left: 0, zIndex: Z_HEADER_FROZEN,
+                  background: '#F8FAFB',
+                }}
+                className="px-2 py-2.5">
                 <input type="checkbox" checked={selectedRows.size === filtered.length && filtered.length > 0}
                   onChange={toggleAll} className="w-3.5 h-3.5 rounded accent-[#1EC9C4] cursor-pointer" />
               </th>
-              <th style={{ width: 40, borderRight: '2px solid #1EC9C4', color: '#A1A9B6', fontSize: 11, fontWeight: 600 }}
+              <th
+                style={{
+                  width: 40,
+                  borderRight: '2px solid #1EC9C4',
+                  borderBottom: '2px solid #E5E7EB',
+                  color: '#A1A9B6', fontSize: 11, fontWeight: 600,
+                  position: 'sticky', top: 0, left: 40, zIndex: Z_HEADER_FROZEN,
+                  background: '#F8FAFB',
+                }}
                 className="px-2 py-2.5 text-center">#</th>
 
-              {displayColumns.map((col) => (
-                <th key={col.key}
-                  style={{
-                    borderRight: col.key === 'phone' ? '2px solid #1EC9C4' : '1px solid #E5E7EB',
-                    fontWeight: 600, fontSize: 11, color: '#6B7280',
-                    padding: '6px 8px', whiteSpace: 'nowrap',
-                  }}>
-                  <HeaderCell col={col} onRename={renameColumn} onDelete={deleteColumn} canEdit={can('columns.edit')} canDelete={can('columns.delete')} />
-                </th>
-              ))}
+              {displayColumns.map((col) => {
+                const frozen = isFrozenCol(col.key);
+                // The synthesised "Project" column in folder view isn't part of
+                // the real column list, so it can't be resized (no persistence
+                // target). Everything else is resizable when the perm is held.
+                const resizable = can('columns.resize') && col.key !== 'projectName';
+                return (
+                  <th key={col.key}
+                    style={{
+                      borderRight: col.key === 'phone' ? '2px solid #1EC9C4' : '1px solid #E5E7EB',
+                      borderBottom: '2px solid #E5E7EB',
+                      fontWeight: 600, fontSize: 11, color: '#6B7280',
+                      padding: '6px 8px', whiteSpace: 'nowrap',
+                      position: 'sticky',
+                      top: 0,
+                      // Every sticky th needs an opaque background — once it's on
+                      // its own paint layer, the <tr>'s background no longer
+                      // shows through and body cells scroll visibly under it.
+                      background: '#F8FAFB',
+                      ...(frozen ? { left: frozenLeftMap.get(col.key), zIndex: Z_HEADER_FROZEN } : { zIndex: Z_HEADER }),
+                    }}>
+                    <HeaderCell col={col} onRename={renameColumn} onDelete={deleteColumn} canEdit={can('columns.edit')} canDelete={can('columns.delete')} />
+                    {resizable && (
+                      <ColumnResizer width={col.width} onResize={(w) => resizeColumn(col.key, w)} />
+                    )}
+                  </th>
+                );
+              })}
 
               {/* Add Field button — gated by columns.create */}
-              <th style={{ borderLeft: '1px solid #E5E7EB', width: 80 }} className="px-2 py-2.5">
+              <th
+                style={{
+                  borderLeft: '1px solid #E5E7EB',
+                  borderBottom: '2px solid #E5E7EB',
+                  width: 80,
+                  position: 'sticky', top: 0, zIndex: Z_HEADER, background: '#F8FAFB',
+                }}
+                className="px-2 py-2.5">
                 {can('columns.create') && (
                   <button
                     onClick={() => setShowAddField(true)}
@@ -4907,17 +6246,33 @@ export default function ProspectHub() {
               const rowBg = isSelected ? '#EFF6FF' : idx % 2 === 0 ? '#F0FFFE' : '#FFFFFF';
               return (
                 <tr key={row.id} id={`row-${row.id}`}
-                  style={{ background: rowBg, borderBottom: '1px solid #E5E7EB' }}
+                  style={{ background: rowBg }}
                   className="group hover:bg-blue-50/60 transition-colors">
 
                   {/* Checkbox */}
-                  <td style={{ width: 40, borderRight: '1px solid #E5E7EB' }} className="px-2 py-0 h-9 text-center">
+                  <td
+                    style={{
+                      width: 40,
+                      borderRight: '1px solid #E5E7EB',
+                      borderBottom: '1px solid #E5E7EB',
+                      position: 'sticky', left: 0, zIndex: Z_BODY_FROZEN,
+                      background: rowBg,
+                    }}
+                    className="px-2 py-0 h-9 text-center">
                     <input type="checkbox" checked={isSelected} onChange={() => toggleRow(row.id)}
                       className="w-3.5 h-3.5 rounded accent-[#1EC9C4] cursor-pointer" />
                   </td>
 
                   {/* Row number + menu */}
-                  <td style={{ width: 40, borderRight: '2px solid #1EC9C4', fontSize: 11, color: '#A1A9B6', textAlign: 'center' }}
+                  <td
+                    style={{
+                      width: 40,
+                      borderRight: '2px solid #1EC9C4',
+                      borderBottom: '1px solid #E5E7EB',
+                      fontSize: 11, color: '#A1A9B6', textAlign: 'center',
+                      position: 'sticky', left: 40, zIndex: Z_BODY_FROZEN,
+                      background: rowBg,
+                    }}
                     className="relative px-1 py-0 h-9">
                     <div className="relative flex items-center justify-center h-full">
                       <span className="group-hover:invisible">{idx + 1}</span>
@@ -4950,6 +6305,11 @@ export default function ProspectHub() {
                     const isFilling = fillRange.has(row.id) && fillSrc.current?.colKey === col.key;
                     const cellValue = getCellValue(row, col.key);
                     const projectInfo = col.key === 'projectName' ? prospectToBoard.get(row.id) : null;
+                    const frozen = isFrozenCol(col.key);
+                    // Sticky cells need their own background — the <tr> bg falls
+                    // behind once the cell is on its own paint layer. Mirror the
+                    // row's stripe (or fill/select tint) onto the cell itself.
+                    const cellBg = isFilling ? 'rgba(59,130,246,0.06)' : frozen ? rowBg : undefined;
 
                     return (
                       <td
@@ -4960,22 +6320,61 @@ export default function ProspectHub() {
                         style={{
                           height: 36, padding: 0,
                           borderRight: col.key === 'phone' ? '2px solid #1EC9C4' : '1px solid #E5E7EB',
+                          borderBottom: '1px solid #E5E7EB',
                           verticalAlign: 'middle',
                           outline: isActive ? '2px solid #1EC9C4' : isFilling ? '2px solid #3B82F6' : 'none',
                           outlineOffset: '-2px',
-                          background: isFilling ? 'rgba(59,130,246,0.06)' : undefined,
-                          position: 'relative',
+                          background: cellBg,
+                          ...(frozen
+                            ? { position: 'sticky', left: frozenLeftMap.get(col.key), zIndex: Z_BODY_FROZEN }
+                            : { position: 'relative' }),
                         }}>
 
-                        {/* Select cells */}
-                        {col.type === 'select' && col.selectKey === 'callingStatus' &&
-                          <CallingDropdown value={row.callingStatus} onChange={(v) => updateRow(row.id, 'callingStatus', v)} />}
-                        {col.type === 'select' && col.selectKey === 'listingType' &&
-                          <ListingDropdown value={row.listingType} onChange={(v) => updateRow(row.id, 'listingType', v)} />}
-                        {col.type === 'select' && col.selectKey === 'furnishing' &&
-                          <FurnishingDropdown value={row.furnishing} onChange={(v) => updateRow(row.id, 'furnishing', v)} />}
-                        {col.type === 'select' && col.selectKey === 'availability' &&
-                          <AvailabilityDropdown value={row.availability} onChange={(v) => updateRow(row.id, 'availability', v)} />}
+                        {/* Select cells — all single-select dropdowns share one
+                            component; presets + colours come from the workspace
+                            `dropdown_presets` table. */}
+                        {col.type === 'select' && col.selectKey === 'callingStatus' && (
+                          <CustomDropdown value={row.callingStatus}
+                            presets={dropdownPresetsByField.calling_status}
+                            canManage={can('dropdowns.manage')} canRemove={can('dropdowns.remove_options')}
+                            onChange={(v) => updateRow(row.id, 'callingStatus', v as CallingStatus)}
+                            onAddPreset={(label, color) => addDropdownPreset('calling_status', label, color)}
+                            onRemovePreset={removeDropdownPreset} />
+                        )}
+                        {col.type === 'select' && col.selectKey === 'listingType' && (
+                          <CustomMultiDropdown value={row.listingType}
+                            presets={dropdownPresetsByField.listing_type}
+                            canManage={can('dropdowns.manage')} canRemove={can('dropdowns.remove_options')}
+                            onChange={(v) => updateRow(row.id, 'listingType', v)}
+                            onAddPreset={(label, color) => addDropdownPreset('listing_type', label, color)}
+                            onRemovePreset={removeDropdownPreset} />
+                        )}
+                        {col.type === 'select' && col.selectKey === 'furnishing' && (
+                          <CustomDropdown value={row.furnishing}
+                            presets={dropdownPresetsByField.furnishing}
+                            canManage={can('dropdowns.manage')} canRemove={can('dropdowns.remove_options')}
+                            onChange={(v) => updateRow(row.id, 'furnishing', v as Furnishing)}
+                            onAddPreset={(label, color) => addDropdownPreset('furnishing', label, color)}
+                            onRemovePreset={removeDropdownPreset} />
+                        )}
+                        {col.type === 'select' && col.selectKey === 'availability' && (
+                          <CustomDropdown value={row.availability}
+                            presets={dropdownPresetsByField.availability}
+                            canManage={can('dropdowns.manage')} canRemove={can('dropdowns.remove_options')}
+                            onChange={(v) => updateRow(row.id, 'availability', v as Availability)}
+                            onAddPreset={(label, color) => addDropdownPreset('availability', label, color)}
+                            onRemovePreset={removeDropdownPreset} />
+                        )}
+                        {col.type === 'select' && col.selectKey === 'valid' &&
+                          <ValidDropdown value={row.valid} onChange={(v) => updateRow(row.id, 'valid', v)} />}
+                        {col.type === 'select' && col.selectKey === 'unitStatus' && (
+                          <CustomDropdown value={row.unitStatus}
+                            presets={dropdownPresetsByField.unit_status}
+                            canManage={can('dropdowns.manage')} canRemove={can('dropdowns.remove_options')}
+                            onChange={(v) => updateRow(row.id, 'unitStatus', v)}
+                            onAddPreset={(label, color) => addDropdownPreset('unit_status', label, color)}
+                            onRemovePreset={removeDropdownPreset} />
+                        )}
 
                         {/* Custom-select cells */}
                         {col.type === 'custom-select' && (
@@ -4987,7 +6386,7 @@ export default function ProspectHub() {
                         )}
 
                         {/* Text cells — double-click to edit */}
-                        {col.type === 'text' && (
+                        {col.type === 'text' && col.key !== 'phone' && (
                           <TextCell
                             value={cellValue}
                             onChange={(v) => setCellValue(row.id, col.key, v)}
@@ -4997,9 +6396,34 @@ export default function ProspectHub() {
                           />
                         )}
 
+                        {/* Phone cell — same TextCell as other text cells, but
+                            with a WhatsApp button overlay on hover that opens
+                            wa.me?text=Hi <name>, in a new tab. */}
+                        {col.type === 'text' && col.key === 'phone' && (
+                          <PhoneCell
+                            row={row}
+                            onChange={(v) => setCellValue(row.id, col.key, v)}
+                            agentName={OWNER_NAME}
+                            // Folder-aggregate view: each row may live in a
+                            // different board, so resolve via the row→board
+                            // map. Single-board view: just the active board.
+                            boardName={folderView
+                              ? (prospectToBoard.get(row.id)?.name ?? '')
+                              : (activeBoard?.name ?? '')}
+                            templates={waTemplates}
+                            lang={waLang}
+                            onLangChange={setWaLang}
+                            canSend={canSendWa}
+                            onManageTemplates={canManageWaTemplates ? () => setShowWaTemplates(true) : undefined}
+                            align={col.align ?? 'left'}
+                            mono={col.mono ?? false}
+                            placeholder={col.placeholder ?? ''}
+                          />
+                        )}
+
                         {/* Project column — folder-aggregate view only */}
                         {col.type === 'readonly' && col.key === 'projectName' && (
-                          <div className="w-full h-full flex items-center gap-2 px-2 py-1">
+                          <div className="w-full flex items-center gap-2 px-2" style={{ minHeight: 36 }}>
                             <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: projectInfo?.color ?? '#D1D5DB' }} />
                             <span className="text-xs truncate font-medium" style={{ color: '#374151' }}>
                               {projectInfo?.name ?? '—'}
@@ -5021,7 +6445,7 @@ export default function ProspectHub() {
 
                         {/* Read-only cells (e.g. Last Update timestamp) */}
                         {col.type === 'readonly' && col.key !== 'projectName' && col.key !== 'agent' && (
-                          <div className="w-full h-full flex items-center px-2 py-1">
+                          <div className="w-full flex items-center px-2" style={{ minHeight: 36 }}>
                             <span className="text-xs truncate" style={{
                               fontFamily: col.mono ? 'JetBrains Mono, monospace' : undefined,
                               color: cellValue ? '#6B7280' : '#D1D5DB',
@@ -5051,7 +6475,7 @@ export default function ProspectHub() {
                     );
                   })}
 
-                  <td style={{ borderLeft: '1px solid #E5E7EB' }} />
+                  <td style={{ borderLeft: '1px solid #E5E7EB', borderBottom: '1px solid #E5E7EB' }} />
                 </tr>
               );
             })}
@@ -5173,6 +6597,14 @@ export default function ProspectHub() {
           onPurge={purgeFromBin}
           onEmpty={emptyBin}
           onClose={() => setShowRecycleBin(false)}
+        />
+      )}
+
+      {showWaTemplates && (
+        <WaTemplatesModal
+          initial={waTemplates}
+          onSave={(next) => { setWaTemplates(next); saveWaTemplates(next); }}
+          onClose={() => setShowWaTemplates(false)}
         />
       )}
 

@@ -80,7 +80,7 @@ export async function saveRolePerms(perms: RolePerms): Promise<void> {
 
 // Factory defaults for the editable roles. Mirrors the seed in
 // migration `permissions_and_invites`.
-const NAV_DEFAULTS = ['nav.dashboard','nav.leads','nav.clients','nav.calendar','nav.documents'];
+const NAV_DEFAULTS = ['nav.dashboard','nav.leads','nav.clients','nav.calendar','nav.documents','nav.listing'];
 
 const DEFAULTS = {
   admin: [
@@ -88,27 +88,33 @@ const DEFAULTS = {
     'boards.create','boards.edit','boards.delete','boards.reorder','boards.invite_members','boards.remove_members',
     'folders.create','folders.edit','folders.delete','folders.assign_boards','folders.view_combined','folders.invite_members','folders.remove_members',
     'rows.create','rows.edit','rows.delete','rows.duplicate','rows.bulk_delete',
-    'columns.create','columns.edit','columns.delete',
-    'agents.manage',
+    'columns.create','columns.edit','columns.delete','columns.resize',
+    'agents.manage','dropdowns.manage','dropdowns.remove_options',
     'data.import','data.export','data.demo',
-    'view.filter','view.quick_tabs',
+    'view.filter','view.quick_tabs','view.pan_zoom',
+    'whatsapp.send','whatsapp.manage_templates',
     'recycle.access','recycle.restore','recycle.purge',
   ],
+  // Editors can ADD custom dropdown options but not REMOVE them by default —
+  // removal is destructive (orphans the value on every row using it) so it's
+  // gated behind a separate permission an admin can grant explicitly.
   editor: [
     ...NAV_DEFAULTS,
     'folders.view_combined',
     'rows.create','rows.edit','rows.duplicate',
-    'columns.create','columns.edit',
-    'agents.manage',
+    'columns.create','columns.edit','columns.resize',
+    'agents.manage','dropdowns.manage',
     'data.import','data.export',
-    'view.filter','view.quick_tabs',
+    'view.filter','view.quick_tabs','view.pan_zoom',
+    'whatsapp.send','whatsapp.manage_templates',
     'recycle.access','recycle.restore',
   ],
   viewer: [
     ...NAV_DEFAULTS,
     'folders.view_combined',
     'data.export',
-    'view.filter','view.quick_tabs',
+    'view.filter','view.quick_tabs','view.pan_zoom',
+    'whatsapp.send',
   ],
 } as const;
 

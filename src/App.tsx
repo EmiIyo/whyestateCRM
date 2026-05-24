@@ -16,6 +16,7 @@ import MyProfile from "@/pages/MyProfile";
 import CalendarPage from "@/pages/Calendar";
 import DocumentsPage from "@/pages/Documents";
 import ClientsPage from "@/pages/Clients";
+import ListingPage from "@/pages/Listing/Index";
 import Dashboard from "@/pages/Dashboard";
 import NotFound from "./pages/not-found/Index";
 
@@ -39,6 +40,7 @@ const App = () => (
           <Route path={ROUTE_PATHS.CLIENTS}    element={<RequireAuth permission="nav.clients"><Layout><ClientsPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.CALENDAR}   element={<RequireAuth permission="nav.calendar"><Layout><CalendarPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.DOCUMENTS}  element={<RequireAuth permission="nav.documents"><Layout><DocumentsPage /></Layout></RequireAuth>} />
+          <Route path={ROUTE_PATHS.LISTING}    element={<RequireAuth permission="nav.listing"><Layout><ListingPage /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.ADMIN}      element={<RequireAuth adminPanel><Layout><AdminControl /></Layout></RequireAuth>} />
           <Route path={ROUTE_PATHS.SETTINGS}   element={<RequireAuth><Layout><MyProfile /></Layout></RequireAuth>} />
 

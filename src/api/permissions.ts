@@ -27,6 +27,7 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: 'nav.clients',           label: 'Clients',                         group: 'Navigation' },
   { key: 'nav.calendar',          label: 'Calendar',                        group: 'Navigation' },
   { key: 'nav.documents',         label: 'Documents',                       group: 'Navigation' },
+  { key: 'nav.listing',           label: 'Listing',                         group: 'Navigation' },
 
   { key: 'boards.create',         label: 'Create new board',                group: 'Boards' },
   { key: 'boards.edit',           label: 'Edit board settings',             group: 'Boards' },
@@ -52,8 +53,12 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: 'columns.create',        label: 'Add custom column',               group: 'Columns' },
   { key: 'columns.edit',          label: 'Rename column',                   group: 'Columns' },
   { key: 'columns.delete',        label: 'Delete column',                   group: 'Columns' },
+  { key: 'columns.resize',        label: 'Resize column widths',            group: 'Columns' },
 
   { key: 'agents.manage',         label: 'Add / remove agent presets',      group: 'Agents' },
+
+  { key: 'dropdowns.manage',         label: 'Add / colour custom dropdown options', group: 'Dropdowns' },
+  { key: 'dropdowns.remove_options', label: 'Remove dropdown options',              group: 'Dropdowns' },
 
   { key: 'data.import',           label: 'Import data (CSV / Excel)',       group: 'Data' },
   { key: 'data.export',           label: 'Export data (CSV / Excel)',       group: 'Data' },
@@ -61,6 +66,10 @@ export const PERMISSIONS: PermissionDef[] = [
 
   { key: 'view.filter',           label: 'Use filters and search',          group: 'View' },
   { key: 'view.quick_tabs',       label: 'Use quick-view tabs (All / Rent / Sale)', group: 'View' },
+  { key: 'view.pan_zoom',         label: 'Pan & zoom the grid (View → Unlock)',     group: 'View' },
+
+  { key: 'whatsapp.send',             label: 'Send WhatsApp messages from row',       group: 'WhatsApp' },
+  { key: 'whatsapp.manage_templates', label: 'Add / edit WhatsApp message templates', group: 'WhatsApp' },
 
   { key: 'recycle.access',        label: 'Open the Recycle Bin',            group: 'Recycle Bin' },
   { key: 'recycle.restore',       label: 'Restore deleted items',           group: 'Recycle Bin' },

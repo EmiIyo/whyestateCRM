@@ -575,6 +575,7 @@ export type Database = {
           created_by: string | null
           furnishing: string
           id: string
+          last_edited_at: string | null
           listing_type: string
           name: string
           phone: string
@@ -583,8 +584,10 @@ export type Database = {
           size: string
           type: string
           unit_no: string
+          unit_status: string
           updated_at: string
           updated_by: string | null
+          valid: string
         }
         Insert: {
           asking_price?: string
@@ -596,6 +599,7 @@ export type Database = {
           created_by?: string | null
           furnishing?: string
           id?: string
+          last_edited_at?: string | null
           listing_type?: string
           name?: string
           phone?: string
@@ -604,8 +608,10 @@ export type Database = {
           size?: string
           type?: string
           unit_no?: string
+          unit_status?: string
           updated_at?: string
           updated_by?: string | null
+          valid?: string
         }
         Update: {
           asking_price?: string
@@ -617,6 +623,7 @@ export type Database = {
           created_by?: string | null
           furnishing?: string
           id?: string
+          last_edited_at?: string | null
           listing_type?: string
           name?: string
           phone?: string
@@ -625,8 +632,40 @@ export type Database = {
           size?: string
           type?: string
           unit_no?: string
+          unit_status?: string
           updated_at?: string
           updated_by?: string | null
+          valid?: string
+        }
+        Relationships: []
+      }
+      dropdown_presets: {
+        Row: {
+          color: string
+          created_at: string
+          created_by: string | null
+          field: string
+          id: string
+          position: number
+          value: string
+        }
+        Insert: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          field?: string
+          id?: string
+          position?: number
+          value: string
+        }
+        Update: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          field?: string
+          id?: string
+          position?: number
+          value?: string
         }
         Relationships: []
       }
