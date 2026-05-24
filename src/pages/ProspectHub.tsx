@@ -21,6 +21,8 @@ import * as foldersApi   from '@/api/folders';
 import * as membersApi   from '@/api/members';
 import * as agentsApi    from '@/api/agent-presets';
 import * as recycleApi   from '@/api/recycle-bin';
+import * as prefsApi     from '@/api/user_preferences';
+import type { WaLang, WaTemplate } from '@/api/user_preferences';
 import type { Json } from '@/types/database';
 import { notifySuccess, notifyError } from '@/lib/notify';
 import { confirm } from '@/components/ConfirmDialog';
@@ -144,16 +146,13 @@ function WhatsAppIcon({ size = 12 }: { size?: number }) {
 }
 
 // ─── WhatsApp templates ────────────────────────────────────────────────────
-// Templates are stored per-user in localStorage so each agent can build their
-// own library. Body can use {key} tokens (any Prospect field, plus a few
-// derived helpers like {agent} / {first_name}) — see `WA_TOKENS` below for
-// the full menu shown in the settings modal.
-type WaLang = 'en' | 'zh';
-interface WaTemplate { id: string; label: string; body: string; lang: WaLang }
+// Templates persist per-user in Supabase (`user_preferences.wa_templates`)
+// so each agent's library follows them across devices. Body can use {key}
+// tokens (any Prospect field, plus derived helpers like {agent} /
+// {first_name}) — see `WA_TOKENS` below for the menu shown in the editor.
+// `WaLang` / `WaTemplate` are imported from `@/api/user_preferences`.
 
-const WA_TEMPLATES_KEY  = 'we.wa_templates';
-const WA_LANG_KEY       = 'we.wa_lang';
-
+// Factory defaults used when the user's saved library is empty (first use).
 const DEFAULT_WA_TEMPLATES: WaTemplate[] = [
   {
     id: 'initial', lang: 'en',
@@ -171,35 +170,6 @@ const DEFAULT_WA_TEMPLATES: WaTemplate[] = [
       `Are you still open to listing it? Happy to share market comparables and discuss next steps whenever it suits you.`,
   },
 ];
-
-function loadWaTemplates(): WaTemplate[] {
-  if (typeof window === 'undefined') return DEFAULT_WA_TEMPLATES;
-  try {
-    const raw = localStorage.getItem(WA_TEMPLATES_KEY);
-    if (!raw) return DEFAULT_WA_TEMPLATES;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_WA_TEMPLATES;
-    // Backfill `lang` on pre-language templates so the filter still works.
-    return (parsed as Partial<WaTemplate>[]).map((t) => ({
-      id:    String(t.id ?? `tpl_${Math.random().toString(36).slice(2, 8)}`),
-      label: String(t.label ?? ''),
-      body:  String(t.body ?? ''),
-      lang:  (t.lang === 'zh' ? 'zh' : 'en') as WaLang,
-    }));
-  } catch { return DEFAULT_WA_TEMPLATES; }
-}
-function saveWaTemplates(templates: WaTemplate[]): void {
-  try { localStorage.setItem(WA_TEMPLATES_KEY, JSON.stringify(templates)); } catch { /* ignore */ }
-}
-
-function loadWaLang(): WaLang {
-  if (typeof window === 'undefined') return 'en';
-  try { return (localStorage.getItem(WA_LANG_KEY) === 'zh' ? 'zh' : 'en') as WaLang; }
-  catch { return 'en'; }
-}
-function saveWaLang(lang: WaLang): void {
-  try { localStorage.setItem(WA_LANG_KEY, lang); } catch { /* ignore */ }
-}
 
 // Token catalog shown in the template editor. Each entry: { token, label,
 // resolver }. Resolver receives the row + agent and returns the substituted
@@ -372,7 +342,7 @@ function WhatsAppButton({ row, agentName, boardName, templates, lang, onLangChan
 
           {/* Language toggle — filters the template list to only show
               templates tagged with the picked language. Preference is
-              persisted (per-user, localStorage). */}
+              persisted per-user in Supabase (user_preferences.wa_lang). */}
           <div className="flex items-center justify-between px-3 pt-2 pb-1">
             <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#9CA3AF' }}>
               Pick a message
@@ -823,10 +793,10 @@ function FolderPromptModal({
 }
 
 // ─── WhatsApp Message Templates settings ────────────────────────────────────
-// Per-user template library backed by localStorage. Lets the agent edit the
-// shipped templates (Initial outreach / Follow up), add new ones, and insert
-// column tokens like {first_name} or {askingRent} so the message auto-fills
-// with the row's data when sent.
+// Per-user template library backed by Supabase (user_preferences.wa_templates).
+// Lets the agent edit the shipped templates (Initial outreach / Follow up),
+// add new ones, and insert column tokens like {first_name} or {askingRent}
+// so the message auto-fills with the row's data when sent.
 function WaTemplatesModal({ initial, onSave, onClose }: {
   initial: WaTemplate[];
   onSave: (next: WaTemplate[]) => void;
@@ -4155,27 +4125,6 @@ function ImportModal({ onClose, onImport }: {
   );
 }
 
-// ─── Column-width persistence ────────────────────────────────────────────────
-// Per-user UI preference; lives in localStorage rather than the DB so it
-// doesn't roundtrip on every render and isn't tied to a particular board.
-const COLUMN_WIDTHS_KEY = 'we.column_widths';
-function loadColumnWidths(): Record<string, number> {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(COLUMN_WIDTHS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, number>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch { return {}; }
-}
-function saveColumnWidth(key: string, width: number): void {
-  try {
-    const all = loadColumnWidths();
-    all[key] = width;
-    localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(all));
-  } catch { /* ignore — non-critical */ }
-}
-
 // ─── Column resize handle ────────────────────────────────────────────────────
 // 6px-wide invisible grip on the right edge of each header cell. Drag to
 // resize; commits + persists on mouseup. Hidden entirely when the user lacks
@@ -5096,14 +5045,18 @@ export default function ProspectHub() {
   const [showAddField, setShowAddField] = useState(false);
 
   // ── Dynamic columns (base + custom) ──────────────────────────────────────
-  // Per-user column widths persist in localStorage so a resize sticks across
-  // page reloads (no DB round-trip for what's essentially a UI preference).
-  const [columns, setColumns] = useState<ColDef[]>(() => {
-    const saved = loadColumnWidths();
-    return BASE_COLUMNS.map((c) => (saved[c.key] != null ? { ...c, width: saved[c.key] } : c));
-  });
+  // Widths start at the BASE_COLUMNS defaults, then get patched in after
+  // `user_preferences.column_widths` loads from Supabase (see the prefs
+  // useEffect further down). Resizes write back to that row, so the layout
+  // follows the user across devices.
+  const [columns, setColumns] = useState<ColDef[]>(() => BASE_COLUMNS.map((c) => ({ ...c })));
   // Custom field values: { rowId: { colKey: value } }
   const [customValues, setCustomValues] = useState<Record<string, Record<string, string>>>({});
+
+  // Debounce column-width writes so dragging a resizer doesn't fire one
+  // round-trip per pixel — only the final width hits the DB.
+  const colWidthSaveTimer = useRef<number | null>(null);
+  const colWidthPending   = useRef<Record<string, number>>({});
 
   const renameColumn = (key: string, label: string) => {
     if (!can('columns.edit')) return;
@@ -5112,7 +5065,18 @@ export default function ProspectHub() {
   const resizeColumn = (key: string, width: number) => {
     if (!can('columns.resize')) return;
     setColumns((prev) => prev.map((c) => c.key === key ? { ...c, width } : c));
-    saveColumnWidth(key, width);
+    colWidthPending.current[key] = width;
+    if (colWidthSaveTimer.current != null) window.clearTimeout(colWidthSaveTimer.current);
+    colWidthSaveTimer.current = window.setTimeout(() => {
+      // Merge into the latest snapshot of all custom widths so a partial
+      // save doesn't wipe widths the user resized earlier in the session.
+      const widths: Record<string, number> = {};
+      for (const c of columnsRef.current) widths[c.key] = c.width;
+      Object.assign(widths, colWidthPending.current);
+      colWidthPending.current = {};
+      colWidthSaveTimer.current = null;
+      void prefsApi.saveUserPreferences({ columnWidths: widths }).catch(() => { /* non-critical */ });
+    }, 400);
   };
   const deleteColumn = (key: string) => {
     if (!can('columns.delete')) return;
@@ -5138,27 +5102,71 @@ export default function ProspectHub() {
   const isPanning = useSpacePan(gridScrollRef);
 
   // View → Locked/Unlocked. Unlocked enables click-drag panning + zoom
-  // controls so the grid behaves like a canvas. Persists per-user via
-  // localStorage so the preference survives reloads.
-  const [viewUnlocked, setViewUnlocked] = useState<boolean>(() => {
-    try { return localStorage.getItem('we.view.unlocked') === '1'; } catch { return false; }
-  });
-  const [gridZoom, setGridZoom] = useState<number>(() => {
-    try { const v = Number(localStorage.getItem('we.view.zoom')); return Number.isFinite(v) && v >= 0.5 && v <= 2 ? v : 1; } catch { return 1; }
-  });
-  useEffect(() => { try { localStorage.setItem('we.view.unlocked', viewUnlocked ? '1' : '0'); } catch { /* ignore */ } }, [viewUnlocked]);
-  useEffect(() => { try { localStorage.setItem('we.view.zoom', String(gridZoom)); } catch { /* ignore */ } }, [gridZoom]);
+  // controls so the grid behaves like a canvas. Persisted per-user in
+  // Supabase via `user_preferences` — synced through the boot effect below.
+  const [viewUnlocked, setViewUnlocked] = useState<boolean>(false);
+  const [gridZoom, setGridZoom]         = useState<number>(1);
   const canPanZoom = can('view.pan_zoom');
   // Only enable drag-pan when both the permission and the unlock toggle are on.
   const isDragPanning = useDragPan(gridScrollRef, canPanZoom && viewUnlocked);
 
-  // ── WhatsApp templates (per-user, localStorage-backed) ──────────────────
-  const [waTemplates, setWaTemplates]   = useState<WaTemplate[]>(() => loadWaTemplates());
-  const [waLang, setWaLang]             = useState<WaLang>(() => loadWaLang());
+  // ── WhatsApp templates (per-user, Supabase-backed) ────────────────────
+  const [waTemplates, setWaTemplates]   = useState<WaTemplate[]>([]);
+  const [waLang, setWaLang]             = useState<WaLang>('en');
   const [showWaTemplates, setShowWaTemplates] = useState(false);
-  useEffect(() => { saveWaLang(waLang); }, [waLang]);
   const canManageWaTemplates = can('whatsapp.manage_templates');
   const canSendWa            = can('whatsapp.send');
+
+  // ── User-pref boot + persistence ────────────────────────────────────────
+  // One round-trip on mount pulls column widths, view state, WA templates
+  // and lang. After that, mutations write through to the DB. `prefsReady`
+  // gates the save effects so we don't clobber the just-loaded row with
+  // the initial defaults during the first render.
+  const columnsRef = useRef(columns);
+  useEffect(() => { columnsRef.current = columns; }, [columns]);
+  const prefsReady = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = await prefsApi.loadUserPreferences();
+        if (cancelled) return;
+        // Patch the column defaults with the user's saved widths.
+        if (Object.keys(p.columnWidths).length > 0) {
+          setColumns((prev) => prev.map((c) => (p.columnWidths[c.key] != null ? { ...c, width: p.columnWidths[c.key] } : c)));
+        }
+        setViewUnlocked(p.viewUnlocked);
+        // Clamp to the same range the zoom buttons enforce, so a corrupt
+        // value can't break the UI.
+        const z = p.viewZoom;
+        setGridZoom(Number.isFinite(z) && z >= 0.5 && z <= 2 ? z : 1);
+        // First-time users get the factory templates. We persist them so
+        // the editor doesn't open empty on the next visit.
+        if (p.waTemplates.length === 0) {
+          setWaTemplates(DEFAULT_WA_TEMPLATES);
+          void prefsApi.saveUserPreferences({ waTemplates: DEFAULT_WA_TEMPLATES });
+        } else {
+          setWaTemplates(p.waTemplates);
+        }
+        setWaLang(p.waLang);
+      } catch { /* offline / first-boot — keep defaults */ }
+      finally { if (!cancelled) prefsReady.current = true; }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!prefsReady.current) return;
+    void prefsApi.saveUserPreferences({ viewUnlocked }).catch(() => { /* non-critical */ });
+  }, [viewUnlocked]);
+  useEffect(() => {
+    if (!prefsReady.current) return;
+    void prefsApi.saveUserPreferences({ viewZoom: gridZoom }).catch(() => { /* non-critical */ });
+  }, [gridZoom]);
+  useEffect(() => {
+    if (!prefsReady.current) return;
+    void prefsApi.saveUserPreferences({ waLang }).catch(() => { /* non-critical */ });
+  }, [waLang]);
 
   // ── Row virtualization ────────────────────────────────────────────────────
   // Only render the rows currently in the viewport. Prevents the table from
@@ -6603,7 +6611,10 @@ export default function ProspectHub() {
       {showWaTemplates && (
         <WaTemplatesModal
           initial={waTemplates}
-          onSave={(next) => { setWaTemplates(next); saveWaTemplates(next); }}
+          onSave={(next) => {
+            setWaTemplates(next);
+            void prefsApi.saveUserPreferences({ waTemplates: next }).catch(() => { /* non-critical */ });
+          }}
           onClose={() => setShowWaTemplates(false)}
         />
       )}

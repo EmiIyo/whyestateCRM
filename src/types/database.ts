@@ -7,6 +7,8 @@ export type Json =
   | Json[]
 
 export type Database = {
+  // Allows to automatically instantiate createClient with right options
+  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
     PostgrestVersion: "14.5"
   }
@@ -37,7 +39,15 @@ export type Database = {
           name?: string
           position?: number
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "agent_presets_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       board_members: {
         Row: {
@@ -61,7 +71,29 @@ export type Database = {
           role?: Database["public"]["Enums"]["member_role"]
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "board_members_board_id_fkey"
+            columns: ["board_id"]
+            isOneToOne: false
+            referencedRelation: "boards"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "board_members_invited_by_fkey"
+            columns: ["invited_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "board_members_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       boards: {
         Row: {
@@ -97,7 +129,22 @@ export type Database = {
           position?: number
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "boards_folder_id_fkey"
+            columns: ["folder_id"]
+            isOneToOne: false
+            referencedRelation: "folders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "boards_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       calendar_events: {
         Row: {
@@ -160,7 +207,29 @@ export type Database = {
           title?: string
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "calendar_events_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "calendar_events_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "calendar_events_prospect_id_fkey"
+            columns: ["prospect_id"]
+            isOneToOne: false
+            referencedRelation: "prospects"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       client_tasks: {
         Row: {
@@ -190,7 +259,15 @@ export type Database = {
           priority?: Database["public"]["Enums"]["task_priority"]
           title?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "client_tasks_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       clients: {
         Row: {
@@ -256,7 +333,22 @@ export type Database = {
           unit_no?: string | null
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "clients_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clients_prospect_id_fkey"
+            columns: ["prospect_id"]
+            isOneToOne: false
+            referencedRelation: "prospects"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       custom_fields: {
         Row: {
@@ -292,7 +384,22 @@ export type Database = {
           position?: number
           type?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "custom_fields_board_id_fkey"
+            columns: ["board_id"]
+            isOneToOne: false
+            referencedRelation: "boards"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "custom_fields_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       custom_values: {
         Row: {
@@ -313,7 +420,22 @@ export type Database = {
           updated_at?: string
           value?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "custom_values_field_id_fkey"
+            columns: ["field_id"]
+            isOneToOne: false
+            referencedRelation: "custom_fields"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "custom_values_prospect_id_fkey"
+            columns: ["prospect_id"]
+            isOneToOne: false
+            referencedRelation: "prospects"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       drive_items: {
         Row: {
@@ -358,6 +480,51 @@ export type Database = {
           synced_at?: string | null
           updated_at?: string
         }
+        Relationships: [
+          {
+            foreignKeyName: "drive_items_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "drive_items_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "drive_items"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      dropdown_presets: {
+        Row: {
+          color: string
+          created_at: string
+          created_by: string | null
+          field: string
+          id: string
+          position: number
+          value: string
+        }
+        Insert: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          field?: string
+          id?: string
+          position?: number
+          value: string
+        }
+        Update: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          field?: string
+          id?: string
+          position?: number
+          value?: string
+        }
         Relationships: []
       }
       folder_members: {
@@ -382,7 +549,29 @@ export type Database = {
           role?: Database["public"]["Enums"]["member_role"]
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "folder_members_folder_id_fkey"
+            columns: ["folder_id"]
+            isOneToOne: false
+            referencedRelation: "folders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "folder_members_invited_by_fkey"
+            columns: ["invited_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "folder_members_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       folders: {
         Row: {
@@ -409,7 +598,15 @@ export type Database = {
           position?: number
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "folders_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       google_connections: {
         Row: {
@@ -439,7 +636,15 @@ export type Database = {
           updated_at?: string
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "google_connections_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       photo_batch_items: {
         Row: {
@@ -493,7 +698,15 @@ export type Database = {
           updated_at?: string
           versions?: Json
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "photo_batch_items_batch_id_fkey"
+            columns: ["batch_id"]
+            isOneToOne: false
+            referencedRelation: "photo_batches"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       photo_batches: {
         Row: {
@@ -517,7 +730,15 @@ export type Database = {
           owner_id?: string
           user_email?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "photo_batches_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       profiles: {
         Row: {
@@ -637,37 +858,29 @@ export type Database = {
           updated_by?: string | null
           valid?: string
         }
-        Relationships: []
-      }
-      dropdown_presets: {
-        Row: {
-          color: string
-          created_at: string
-          created_by: string | null
-          field: string
-          id: string
-          position: number
-          value: string
-        }
-        Insert: {
-          color?: string
-          created_at?: string
-          created_by?: string | null
-          field?: string
-          id?: string
-          position?: number
-          value: string
-        }
-        Update: {
-          color?: string
-          created_at?: string
-          created_by?: string | null
-          field?: string
-          id?: string
-          position?: number
-          value?: string
-        }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "prospects_board_id_fkey"
+            columns: ["board_id"]
+            isOneToOne: false
+            referencedRelation: "boards"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "prospects_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "prospects_updated_by_fkey"
+            columns: ["updated_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       recycle_bin: {
         Row: {
@@ -694,7 +907,15 @@ export type Database = {
           kind?: Database["public"]["Enums"]["recycle_kind"]
           payload?: Json
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "recycle_bin_deleted_by_fkey"
+            columns: ["deleted_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       role_permissions: {
         Row: {
@@ -715,6 +936,44 @@ export type Database = {
           updated_at?: string
           updated_by?: string | null
         }
+        Relationships: [
+          {
+            foreignKeyName: "role_permissions_updated_by_fkey"
+            columns: ["updated_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_preferences: {
+        Row: {
+          column_widths: Json
+          updated_at: string
+          user_id: string
+          view_unlocked: boolean
+          view_zoom: number
+          wa_lang: string
+          wa_templates: Json
+        }
+        Insert: {
+          column_widths?: Json
+          updated_at?: string
+          user_id: string
+          view_unlocked?: boolean
+          view_zoom?: number
+          wa_lang?: string
+          wa_templates?: Json
+        }
+        Update: {
+          column_widths?: Json
+          updated_at?: string
+          user_id?: string
+          view_unlocked?: boolean
+          view_zoom?: number
+          wa_lang?: string
+          wa_templates?: Json
+        }
         Relationships: []
       }
     }
@@ -724,15 +983,16 @@ export type Database = {
     Functions: {
       admin_approve_user: {
         Args: {
-          p_user_id: string
+          p_admin_access: string[]
           p_role: Database["public"]["Enums"]["app_role"]
           p_tier: Database["public"]["Enums"]["user_tier"]
-          p_admin_access: string[]
+          p_user_id: string
         }
         Returns: undefined
       }
-      admin_reject_user: {
-        Args: { p_user_id: string }
+      admin_reject_user: { Args: { p_user_id: string }; Returns: undefined }
+      admin_set_admin_access: {
+        Args: { p_access: string[]; p_user_id: string }
         Returns: undefined
       }
       admin_set_user_role: {
@@ -749,17 +1009,38 @@ export type Database = {
         }
         Returns: undefined
       }
-      admin_set_admin_access: {
-        Args: {
-          p_user_id: string
-          p_access: string[]
-        }
-        Returns: undefined
-      }
       import_prospect_to_client: {
         Args: { p_prospect_id: string }
-        Returns: Database["public"]["Tables"]["clients"]["Row"]
+        Returns: {
+          board_name: string | null
+          budget: string
+          converted_listing_id: string | null
+          created_at: string
+          email: string
+          id: string
+          last_contact: string | null
+          name: string
+          next_follow_up: string | null
+          notes: string
+          owner_id: string
+          phone: string
+          property_interest: string
+          prospect_id: string | null
+          source: Database["public"]["Enums"]["client_source"]
+          stage: Database["public"]["Enums"]["client_stage"]
+          type: Database["public"]["Enums"]["client_type"]
+          unit_no: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "clients"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
+      reorder_boards: { Args: { p_ids: string[] }; Returns: undefined }
+      reorder_folders: { Args: { p_ids: string[] }; Returns: undefined }
     }
     Enums: {
       app_role: "master_admin" | "admin" | "editor" | "viewer"
@@ -786,23 +1067,121 @@ export type Database = {
 }
 
 type DatabaseWithoutInternals = Omit<Database, "__InternalSupabase">
+
 type DefaultSchema = DatabaseWithoutInternals[Extract<keyof Database, "public">]
 
 export type Tables<
-  T extends keyof DefaultSchema["Tables"]
-> = DefaultSchema["Tables"][T]["Row"]
+  DefaultSchemaTableNameOrOptions extends
+    | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
+        DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
+    : never = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
+      DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])[TableName] extends {
+      Row: infer R
+    }
+    ? R
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof (DefaultSchema["Tables"] &
+        DefaultSchema["Views"])
+    ? (DefaultSchema["Tables"] &
+        DefaultSchema["Views"])[DefaultSchemaTableNameOrOptions] extends {
+        Row: infer R
+      }
+      ? R
+      : never
+    : never
 
 export type TablesInsert<
-  T extends keyof DefaultSchema["Tables"]
-> = DefaultSchema["Tables"][T]["Insert"]
+  DefaultSchemaTableNameOrOptions extends
+    | keyof DefaultSchema["Tables"]
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
+    : never = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"][TableName] extends {
+      Insert: infer I
+    }
+    ? I
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof DefaultSchema["Tables"]
+    ? DefaultSchema["Tables"][DefaultSchemaTableNameOrOptions] extends {
+        Insert: infer I
+      }
+      ? I
+      : never
+    : never
 
 export type TablesUpdate<
-  T extends keyof DefaultSchema["Tables"]
-> = DefaultSchema["Tables"][T]["Update"]
+  DefaultSchemaTableNameOrOptions extends
+    | keyof DefaultSchema["Tables"]
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
+    : never = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"][TableName] extends {
+      Update: infer U
+    }
+    ? U
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof DefaultSchema["Tables"]
+    ? DefaultSchema["Tables"][DefaultSchemaTableNameOrOptions] extends {
+        Update: infer U
+      }
+      ? U
+      : never
+    : never
 
 export type Enums<
-  T extends keyof DefaultSchema["Enums"]
-> = DefaultSchema["Enums"][T]
+  DefaultSchemaEnumNameOrOptions extends
+    | keyof DefaultSchema["Enums"]
+    | { schema: keyof DatabaseWithoutInternals },
+  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
+    : never = never,
+> = DefaultSchemaEnumNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"][EnumName]
+  : DefaultSchemaEnumNameOrOptions extends keyof DefaultSchema["Enums"]
+    ? DefaultSchema["Enums"][DefaultSchemaEnumNameOrOptions]
+    : never
+
+export type CompositeTypes<
+  PublicCompositeTypeNameOrOptions extends
+    | keyof DefaultSchema["CompositeTypes"]
+    | { schema: keyof DatabaseWithoutInternals },
+  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
+    : never = never,
+> = PublicCompositeTypeNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"][CompositeTypeName]
+  : PublicCompositeTypeNameOrOptions extends keyof DefaultSchema["CompositeTypes"]
+    ? DefaultSchema["CompositeTypes"][PublicCompositeTypeNameOrOptions]
+    : never
 
 export const Constants = {
   public: {
