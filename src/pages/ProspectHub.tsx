@@ -1903,9 +1903,10 @@ function ManageBoardModal({
   const canEdit      = canDo(myRole, 'boards.edit');
   const canDelete    = canDo(myRole, 'boards.delete');
   // The master admin is silently a member of every board (auto-invited on
-  // create) so they can see all work. Other roles shouldn't see them listed.
-  const viewerIsMaster   = myRole === 'master_admin';
-  const displayMembers   = viewerIsMaster ? members : members.filter((m) => !isMasterEmail(m.email));
+  // create) so they can see all work — hide them from the "invited members"
+  // list regardless of who's viewing. The list is for collaborators, not
+  // overseers.
+  const displayMembers = members.filter((m) => !isMasterEmail(m.email));
 
   const dirty = name !== board.name || location !== board.location || color !== board.color;
   const initials = ownerName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || 'U';
@@ -2158,12 +2159,9 @@ function ManageFolderModal({
   const [inviteEmail, setInviteEmail] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Hide the auto-invited master admin from non-master viewers — see the
-  // companion logic in ManageBoardModal for the rationale.
-  const viewAsOverride = useViewAsStore((s) => s.role);
-  const myRole         = resolveAppRole(getCurrentUser()?.email, viewAsOverride);
-  const viewerIsMaster = myRole === 'master_admin';
-  const displayMembers = viewerIsMaster ? members : members.filter((m) => !isMasterEmail(m.email));
+  // Hide the auto-invited master admin from the member list for every
+  // viewer — see the companion logic in ManageBoardModal for the rationale.
+  const displayMembers = members.filter((m) => !isMasterEmail(m.email));
 
   const submitInvite = () => {
     const e = inviteEmail.trim();
@@ -4556,23 +4554,21 @@ export default function ProspectHub() {
   }, [directory]);
 
   // Master-admin entries are auto-added to every board/folder so the master
-  // has visibility across the whole workspace — but to other users that
-  // looks like a stranger lurking on their board. We compute a filter set
-  // here once and use it everywhere the member list (or its count) gets
-  // rendered. Visibility / role logic still uses the unfiltered state so
-  // the master themselves can still see what they're invited to.
-  const viewerIsMaster = myRole === 'master_admin';
+  // has visibility across the whole workspace. The member list is for
+  // "people invited to collaborate on this board" — masters aren't an
+  // invitee, they're an implicit overseer — so the auto-add row is hidden
+  // from EVERY viewer (master included). Role / visibility logic still
+  // reads the unfiltered state so the membership-based RLS path keeps
+  // working.
   const masterEmailSet = useMemo(() => {
     const set = new Set<string>();
     for (const p of directory) if (p.role === 'master_admin') set.add(p.email.toLowerCase());
     return set;
   }, [directory]);
   const filterMembersForDisplay = useCallback(
-    (list: BoardMember[]): BoardMember[] => {
-      if (viewerIsMaster) return list;
-      return list.filter((m) => !masterEmailSet.has(m.email.toLowerCase()));
-    },
-    [viewerIsMaster, masterEmailSet],
+    (list: BoardMember[]): BoardMember[] =>
+      list.filter((m) => !masterEmailSet.has(m.email.toLowerCase())),
+    [masterEmailSet],
   );
 
   const boardFromApi = useCallback((r: boardsApi.Board): Board => {
