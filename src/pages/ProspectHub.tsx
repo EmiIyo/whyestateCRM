@@ -4822,20 +4822,27 @@ export default function ProspectHub() {
   };
 
   // ── Folder mutations ──────────────────────────────────────────────────────
-  // Auto-invite master admin to every new board/folder so they can see all work.
+  // Auto-invite EVERY master admin (there can be more than one) so each has
+  // workspace-wide visibility through the same RLS membership path as a
+  // normal invitee. Skips the master that owns the board themselves — they
+  // already have admin via ownership and a self-row would be redundant.
   const autoInviteMaster = async (kind: 'board' | 'folder', resourceId: string): Promise<void> => {
-    // The board's creator (`OWNER_EMAIL`) is already the implicit admin of
-    // their own board, so if they're also the master no auto-invite is needed.
-    if (isMasterEmail(OWNER_EMAIL)) return;
-    // Find any master_admin in the directory and auto-invite them. There can
-    // be more than one in the future; pick the first.
     const masters = directory.filter((p) => p.role === 'master_admin');
-    const master = masters[0];
-    if (!master) return;
-    try {
-      if (kind === 'board') await membersApi.addBoardMember(resourceId, master.id, 'admin');
-      else                  await membersApi.addFolderMember(resourceId, master.id, 'admin');
-    } catch (e) { notifyError('Could not auto-invite master admin', e); }
+    if (masters.length === 0) return;
+    await Promise.all(masters.map(async (m) => {
+      // Owners get admin implicitly via the boards/folders.owner_id check —
+      // no need to also add them as a member of their own resource.
+      if (m.email.toLowerCase() === OWNER_EMAIL.toLowerCase()) return;
+      try {
+        if (kind === 'board') await membersApi.addBoardMember(resourceId, m.id, 'admin');
+        else                  await membersApi.addFolderMember(resourceId, m.id, 'admin');
+      } catch (e) {
+        // Unique-constraint conflicts (already a member) are expected — only
+        // surface anything else so the operator knows about real failures.
+        const msg = (e as { code?: string } | null)?.code;
+        if (msg !== '23505') notifyError('Could not auto-invite master admin', e);
+      }
+    }));
   };
 
   const createFolder = async (name: string) => {
