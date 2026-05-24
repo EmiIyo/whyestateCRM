@@ -93,3 +93,72 @@ export async function saveUserPreferences(patch: Partial<UserPreferences>): Prom
     .upsert({ user_id: user.id, ...update }, { onConflict: 'user_id' });
   if (error) throw error;
 }
+
+// One-time migration: lifts the legacy `we.*` localStorage keys (used before
+// prefs moved to Supabase) into `user_preferences`, then deletes them so this
+// is a no-op on subsequent boots. Safe to call on every boot — short-circuits
+// when no legacy keys are present. Returns the count of fields migrated so
+// the caller can surface a notice if helpful.
+const LEGACY_KEYS = [
+  'we.column_widths',
+  'we.view.unlocked',
+  'we.view.zoom',
+  'we.wa_templates',
+  'we.wa_lang',
+] as const;
+
+export async function migrateLegacyLocalPrefs(): Promise<number> {
+  if (typeof window === 'undefined') return 0;
+  const ls = window.localStorage;
+  if (!LEGACY_KEYS.some((k) => ls.getItem(k) !== null)) return 0;
+
+  const patch: Partial<UserPreferences> = {};
+
+  const w = ls.getItem('we.column_widths');
+  if (w) {
+    try {
+      const parsed = JSON.parse(w) as Json;
+      const widths = parseWidths(parsed);
+      if (Object.keys(widths).length > 0) patch.columnWidths = widths;
+    } catch { /* skip malformed */ }
+  }
+
+  const u = ls.getItem('we.view.unlocked');
+  if (u != null) patch.viewUnlocked = u === '1';
+
+  const z = ls.getItem('we.view.zoom');
+  if (z != null) {
+    const n = Number(z);
+    if (Number.isFinite(n) && n >= 0.5 && n <= 2) patch.viewZoom = n;
+  }
+
+  const t = ls.getItem('we.wa_templates');
+  if (t) {
+    try {
+      const parsed = JSON.parse(t) as Json;
+      const templates = parseTemplates(parsed);
+      if (templates.length > 0) patch.waTemplates = templates;
+    } catch { /* skip malformed */ }
+  }
+
+  const l = ls.getItem('we.wa_lang');
+  if (l === 'en' || l === 'zh') patch.waLang = l;
+
+  const migrated = Object.keys(patch).length;
+  if (migrated === 0) {
+    // Nothing valid to lift, but the keys still exist — clear them so we
+    // don't re-attempt parsing every boot.
+    LEGACY_KEYS.forEach((k) => ls.removeItem(k));
+    return 0;
+  }
+
+  try {
+    await saveUserPreferences(patch);
+    LEGACY_KEYS.forEach((k) => ls.removeItem(k));
+    return migrated;
+  } catch {
+    // Leave the keys in place so next boot can retry once the user has
+    // network / a valid session.
+    return 0;
+  }
+}

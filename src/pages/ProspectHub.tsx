@@ -5129,6 +5129,12 @@ export default function ProspectHub() {
     let cancelled = false;
     (async () => {
       try {
+        // Lift any pre-migration `we.*` keys still in localStorage into the
+        // user_preferences row before we read it back. After this runs
+        // once per device, the localStorage keys are gone and this becomes
+        // a no-op on subsequent boots.
+        const migrated = await prefsApi.migrateLegacyLocalPrefs();
+        if (migrated > 0) notifySuccess(`Restored ${migrated} preference${migrated === 1 ? '' : 's'} from this device`);
         const p = await prefsApi.loadUserPreferences();
         if (cancelled) return;
         // Patch the column defaults with the user's saved widths.
