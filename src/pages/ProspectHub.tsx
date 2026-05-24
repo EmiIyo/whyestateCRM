@@ -1902,6 +1902,10 @@ function ManageBoardModal({
   const canRemoveMem = canDo(myRole, 'boards.remove_members');
   const canEdit      = canDo(myRole, 'boards.edit');
   const canDelete    = canDo(myRole, 'boards.delete');
+  // The master admin is silently a member of every board (auto-invited on
+  // create) so they can see all work. Other roles shouldn't see them listed.
+  const viewerIsMaster   = myRole === 'master_admin';
+  const displayMembers   = viewerIsMaster ? members : members.filter((m) => !isMasterEmail(m.email));
 
   const dirty = name !== board.name || location !== board.location || color !== board.color;
   const initials = ownerName.split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || 'U';
@@ -2010,14 +2014,14 @@ function ManageBoardModal({
             </div>
 
             {/* Invited members — names pulled from the user directory when available */}
-            {members.length === 0 ? (
+            {displayMembers.length === 0 ? (
               <p className="text-xs text-center py-3" style={{ color: '#9CA3AF' }}>No invited members yet.</p>
             ) : (
               <div className="space-y-2">
                 {(() => {
                   const dir = new Map<string, string>();
                   for (const u of listAllUsers()) dir.set(u.email.toLowerCase(), u.name);
-                  return members.map((m) => {
+                  return displayMembers.map((m) => {
                     const nickname = dir.get(m.email.toLowerCase());
                     const initials = (nickname || m.email).split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
                     const isSignedUp = !!nickname;
@@ -2154,6 +2158,13 @@ function ManageFolderModal({
   const [inviteEmail, setInviteEmail] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Hide the auto-invited master admin from non-master viewers — see the
+  // companion logic in ManageBoardModal for the rationale.
+  const viewAsOverride = useViewAsStore((s) => s.role);
+  const myRole         = resolveAppRole(getCurrentUser()?.email, viewAsOverride);
+  const viewerIsMaster = myRole === 'master_admin';
+  const displayMembers = viewerIsMaster ? members : members.filter((m) => !isMasterEmail(m.email));
+
   const submitInvite = () => {
     const e = inviteEmail.trim();
     if (!e || !e.includes('@')) return;
@@ -2178,7 +2189,7 @@ function ManageFolderModal({
             <div>
               <h3 className="text-base font-bold" style={{ color: '#1A202C' }}>Manage folder</h3>
               <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>
-                {boardCount} {boardCount === 1 ? 'board' : 'boards'} · {members.length} invited
+                {boardCount} {boardCount === 1 ? 'board' : 'boards'} · {displayMembers.length} invited
               </p>
             </div>
           </div>
@@ -2222,14 +2233,14 @@ function ManageFolderModal({
                 style={{ background: '#FEF3C7', color: '#92400E' }}>Owner</span>
             </div>
 
-            {members.length === 0 ? (
+            {displayMembers.length === 0 ? (
               <p className="text-xs text-center py-3" style={{ color: '#9CA3AF' }}>No invited members yet.</p>
             ) : (
               <div className="space-y-2">
                 {(() => {
                   const dir = new Map<string, string>();
                   for (const u of listAllUsers()) dir.set(u.email.toLowerCase(), u.name);
-                  return members.map((m) => {
+                  return displayMembers.map((m) => {
                     const nickname = dir.get(m.email.toLowerCase());
                     const initials = (nickname || m.email).split(' ').map((s) => s[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
                     const isSignedUp = !!nickname;
@@ -4544,6 +4555,26 @@ export default function ProspectHub() {
     return m;
   }, [directory]);
 
+  // Master-admin entries are auto-added to every board/folder so the master
+  // has visibility across the whole workspace — but to other users that
+  // looks like a stranger lurking on their board. We compute a filter set
+  // here once and use it everywhere the member list (or its count) gets
+  // rendered. Visibility / role logic still uses the unfiltered state so
+  // the master themselves can still see what they're invited to.
+  const viewerIsMaster = myRole === 'master_admin';
+  const masterEmailSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of directory) if (p.role === 'master_admin') set.add(p.email.toLowerCase());
+    return set;
+  }, [directory]);
+  const filterMembersForDisplay = useCallback(
+    (list: BoardMember[]): BoardMember[] => {
+      if (viewerIsMaster) return list;
+      return list.filter((m) => !masterEmailSet.has(m.email.toLowerCase()));
+    },
+    [viewerIsMaster, masterEmailSet],
+  );
+
   const boardFromApi = useCallback((r: boardsApi.Board): Board => {
     const owner = profileById.get(r.ownerId);
     return {
@@ -4719,7 +4750,8 @@ export default function ProspectHub() {
   const memberCounts: Record<string, number> = {};
   const updatedPcts: Record<string, number> = {};
   for (const b of visibleBoards) {
-    memberCounts[b.id] = 1 + (boardMembers[b.id]?.length ?? 0); // owner + invited
+    // owner + invited (with the auto-added master hidden from non-master viewers)
+    memberCounts[b.id] = 1 + filterMembersForDisplay(boardMembers[b.id] ?? []).length;
     const arr = boardProspects[b.id] ?? [];
     const updated = arr.filter((p) => p.lastUpdate && p.lastUpdate.length > 0).length;
     updatedPcts[b.id] = arr.length === 0 ? 0 : Math.round((updated / arr.length) * 100);
@@ -4903,12 +4935,14 @@ export default function ProspectHub() {
       for (const f of seed.folders) {
         const created = await foldersApi.createFolder(f.name);
         folderIdMap.set(f.id, created.id);
+        await autoInviteMaster('folder', created.id);
       }
       for (const b of seed.boards) {
         const newFolderId = b.folderId ? (folderIdMap.get(b.folderId) ?? null) : null;
         const created = await boardsApi.createBoard({
           name: b.name, location: b.location, color: b.color, folderId: newFolderId,
         });
+        await autoInviteMaster('board', created.id);
         const rowsForBoard = seed.prospects[b.id] ?? [];
         if (rowsForBoard.length) {
           await prospectsApi.importProspects(created.id, rowsForBoard, 'append');
@@ -6012,7 +6046,7 @@ export default function ProspectHub() {
         <BoardOverview
           boards={visibleBoards}
           folders={visibleFolders}
-          folderMemberCounts={Object.fromEntries(visibleFolders.map((f) => [f.id, (folderMembers[f.id] ?? []).length]))}
+          folderMemberCounts={Object.fromEntries(visibleFolders.map((f) => [f.id, filterMembersForDisplay(folderMembers[f.id] ?? []).length]))}
           collapsedFolders={collapsedFolders}
           memberCounts={memberCounts}
           updatedPcts={updatedPcts}
