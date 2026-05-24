@@ -5875,8 +5875,13 @@ export default function ProspectHub() {
       {/* Hide the rest of the hub while the loader or empty state is showing. */}
       {!loadingHub && !hubIsTrulyEmpty && (<>
       {/* ── Toolbar (grid view only) ──────────────────────────────── */}
+      {/* `flex-wrap` lets the right-side actions (Filter / View / Import /
+          Export) drop to a second row on narrow viewports instead of
+          getting clipped off the right edge. The `flex-1` spacer is
+          replaced with `ml-auto` on the first action so wrapping doesn't
+          leave a phantom-wide gap on its own row. */}
       {view === 'grid' && (
-        <div className="flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-100 flex-shrink-0">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 bg-white border-b border-gray-100 flex-shrink-0">
           {/* Back to Boards */}
           <button onClick={() => { setView('board'); setActiveBoard(null); setFolderView(null); }}
             className="flex items-center gap-1 text-xs font-medium hover:text-[#1EC9C4] transition-colors flex-shrink-0"
@@ -5915,8 +5920,10 @@ export default function ProspectHub() {
             </div>
           )}
 
-          <div className="flex-1" />
-
+          {/* Right-side action group — `ml-auto` pushes it as far right as
+              the current row allows, and on narrow viewports it wraps to a
+              second row instead of being clipped. */}
+          <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2">
           {selectedRows.size > 0 && can('rows.bulk_delete') && (
             <button onClick={deleteSelected} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-200 text-xs font-medium text-red-500 hover:bg-red-50 bg-white transition-colors flex-shrink-0">
               <Trash2 size={13} /> Delete {selectedRows.size}
@@ -5996,6 +6003,7 @@ export default function ProspectHub() {
               <Download size={13} /> Export Data
             </button>
           )}
+          </div>
         </div>
       )}
 
